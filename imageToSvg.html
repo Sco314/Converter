@@ -273,7 +273,7 @@
     const convertBtn = document.getElementById('convertBtn');
     const downloadBtn = document.getElementById('downloadBtn');
     const copySvgBtn = document.getElementById('copySvgBtn');
-    const status = document.getElementById('status');
+    const statusEl = document.getElementById('status');
     const origWrap = document.getElementById('origWrap');
     const svgWrap = document.getElementById('svgWrap');
     const canvas = document.getElementById('workCanvas');
@@ -312,7 +312,7 @@
           origWrap.innerHTML = '';
           origWrap.appendChild(img.cloneNode());
           convertBtn.disabled = false;
-          setStatus(`✅ Loaded: ${img.naturalWidth}×${img.naturalHeight}`, 'success');
+          setStatus(`Loaded: ${img.naturalWidth} x ${img.naturalHeight}`, 'success');
         };
         img.src = e.target.result;
       };
@@ -321,35 +321,36 @@
 
     // ── Status helper ──
     function setStatus(msg, type = '') {
-      status.textContent = msg;
-      status.className = 'status' + (type ? ' ' + type : '');
+      statusEl.textContent = msg;
+      statusEl.className = 'status' + (type ? ' ' + type : '');
     }
 
-    // ── Convert ──
+    // ── Convert button ──
     convertBtn.addEventListener('click', () => {
       if (!sourceImg) return;
       setStatus('Converting...');
-      // defer to allow status to render
       requestAnimationFrame(() => setTimeout(convert, 20));
     });
 
+    // ══════════════════════════════════════════════════════════════
+    // MAIN CONVERSION PIPELINE
+    // ══════════════════════════════════════════════════════════════
     function convert() {
       const t0 = performance.now();
       const numColors = parseInt(colorCount.value);
-      const detail = (11 - parseInt(detailLevel.value)) / 5; // 2.0 (low detail) to 0.2 (high detail)
+      const detail = (11 - parseInt(detailLevel.value)) / 5;
       const smooth = parseInt(smoothLevel.value) / 100;
       const maxPx = parseInt(maxSize.value);
       const mode = edgeMode.value;
       const removeBg = bgMode.value === 'transparent';
 
-      // Scale image
-      let w = sourceImg.naturalWidth;
-      let h = sourceImg.naturalHeight;
+      // Scale image to max size
+      let w = sourceImg.naturalWidth, h = sourceImg.naturalHeight;
       const ratio = Math.min(maxPx / w, maxPx / h, 1);
       w = Math.round(w * ratio);
       h = Math.round(h * ratio);
 
-      // Apply detail: subsample for lower detail
+      // Subsample based on detail level
       const sampW = Math.max(16, Math.round(w / detail));
       const sampH = Math.max(16, Math.round(h / detail));
 
@@ -359,25 +360,25 @@
       const imgData = ctx.getImageData(0, 0, sampW, sampH);
       const pixels = imgData.data;
 
-      // ── Color quantization (median cut) ──
+      // 1) Quantize colors
       const palette = medianCut(pixels, numColors);
 
-      // Map each pixel to nearest palette color
+      // 2) Map pixels to palette indices
       const indexed = new Uint8Array(sampW * sampH);
       for (let i = 0; i < sampW * sampH; i++) {
         const off = i * 4;
-        const r = pixels[off], g = pixels[off + 1], b = pixels[off + 2];
+        const pr = pixels[off], pg = pixels[off + 1], pb = pixels[off + 2];
         let bestD = Infinity, bestIdx = 0;
         for (let c = 0; c < palette.length; c++) {
-          const dr = r - palette[c][0], dg = g - palette[c][1], db = b - palette[c][2];
+          const dr = pr - palette[c][0], dg = pg - palette[c][1], db = pb - palette[c][2];
           const d = dr * dr + dg * dg + db * db;
           if (d < bestD) { bestD = d; bestIdx = c; }
         }
         indexed[i] = bestIdx;
       }
 
-      // Determine background color index (most common color in border pixels)
-      let bgColorIdx = 0;
+      // 3) Detect background color (most frequent on image border)
+      let bgColorIdx = -1;
       if (removeBg) {
         const borderCount = new Uint32Array(palette.length);
         for (let x = 0; x < sampW; x++) {
@@ -391,235 +392,273 @@
         bgColorIdx = borderCount.indexOf(Math.max(...borderCount));
       }
 
-      // ── Trace contours for each color layer ──
-      let paths = '';
+      // 4) Build SVG paths
       const scaleX = w / sampW;
       const scaleY = h / sampH;
+      let paths = '';
 
       if (mode === 'outline') {
-        // Outline mode: trace edges between any two different colors
-        const edges = traceEdges(indexed, sampW, sampH);
-        const smoothed = smooth > 0 ? smoothPath(edges, smooth) : edges;
-        const scaled = smoothed.map(p => [p[0] * scaleX, p[1] * scaleY]);
-        if (scaled.length > 1) {
-          paths += `<path d="${pathToD(scaled)}" fill="none" stroke="#000" stroke-width="1.5"/>\n`;
+        // Outline mode: trace edges between different color regions
+        const edgePaths = traceAllEdges(indexed, sampW, sampH);
+        for (const pts of edgePaths) {
+          if (pts.length < 2) continue;
+          const smoothed = smooth > 0 ? smoothPath(pts, smooth) : pts;
+          const scaled = smoothed.map(p => [p[0] * scaleX, p[1] * scaleY]);
+          paths += `<path d="${buildPathD(scaled, false)}" fill="none" stroke="#000" stroke-width="1.5"/>\n`;
         }
       } else {
-        // Color layers mode
+        // Color layers: trace each color as filled regions
         for (let c = 0; c < palette.length; c++) {
           if (removeBg && c === bgColorIdx) continue;
-          const contours = traceColorRegion(indexed, sampW, sampH, c);
-          const [r, g, b] = palette[c];
-          const hex = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
-          for (const contour of contours) {
-            if (contour.length < 3) continue;
-            const smoothed = smooth > 0 ? smoothPath(contour, smooth) : contour;
+          const regions = traceColorContours(indexed, sampW, sampH, c);
+          const [cr, cg, cb] = palette[c];
+          const hex = '#' + ((1 << 24) + (cr << 16) + (cg << 8) + cb).toString(16).slice(1);
+          for (const region of regions) {
+            if (region.length < 3) continue;
+            const smoothed = smooth > 0 ? smoothPath(region, smooth) : region;
             const scaled = smoothed.map(p => [p[0] * scaleX, p[1] * scaleY]);
-            paths += `<path d="${pathToD(scaled)}Z" fill="${hex}" stroke="${hex}" stroke-width="0.5" stroke-linejoin="round"/>\n`;
+            paths += `<path d="${buildPathD(scaled, true)}" fill="${hex}" stroke="${hex}" stroke-width="0.5" stroke-linejoin="round"/>\n`;
           }
         }
       }
 
       svgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">\n${paths}</svg>`;
-
-      // Show preview
       svgWrap.innerHTML = svgString;
       downloadBtn.disabled = false;
       copySvgBtn.disabled = false;
 
       const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
       const svgKb = (new Blob([svgString]).size / 1024).toFixed(1);
-      setStatus(`✅ Done in ${elapsed}s — ${svgKb} KB — ${palette.length} colors`, 'success');
+      setStatus(`Done in ${elapsed}s - ${svgKb} KB - ${palette.length} colors`, 'success');
     }
 
-    // ── Median Cut color quantization ──
+    // ══════════════════════════════════════════════════════════════
+    // MEDIAN CUT COLOR QUANTIZATION
+    // ══════════════════════════════════════════════════════════════
     function medianCut(pixels, numColors) {
-      // Collect unique-ish color samples
       const samples = [];
-      const step = Math.max(1, Math.floor(pixels.length / 4 / 10000));
-      for (let i = 0; i < pixels.length; i += 4 * step) {
-        samples.push([pixels[i], pixels[i + 1], pixels[i + 2]]);
+      const totalPixels = pixels.length / 4;
+      const step = Math.max(1, Math.floor(totalPixels / 20000));
+      for (let i = 0; i < totalPixels; i += step) {
+        const off = i * 4;
+        samples.push([pixels[off], pixels[off + 1], pixels[off + 2]]);
       }
 
       let buckets = [samples];
       while (buckets.length < numColors) {
-        // Find bucket with largest range in any channel
         let bestBi = 0, bestRange = -1, bestCh = 0;
         for (let bi = 0; bi < buckets.length; bi++) {
           const b = buckets[bi];
           if (b.length < 2) continue;
           for (let ch = 0; ch < 3; ch++) {
             let mn = 255, mx = 0;
-            for (const c of b) { mn = Math.min(mn, c[ch]); mx = Math.max(mx, c[ch]); }
-            const range = mx - mn;
-            if (range > bestRange) { bestRange = range; bestBi = bi; bestCh = ch; }
+            for (const s of b) { if (s[ch] < mn) mn = s[ch]; if (s[ch] > mx) mx = s[ch]; }
+            if (mx - mn > bestRange) { bestRange = mx - mn; bestBi = bi; bestCh = ch; }
           }
         }
         if (bestRange <= 0) break;
         const bucket = buckets[bestBi];
         bucket.sort((a, b) => a[bestCh] - b[bestCh]);
-        const mid = Math.floor(bucket.length / 2);
+        const mid = bucket.length >> 1;
         buckets.splice(bestBi, 1, bucket.slice(0, mid), bucket.slice(mid));
       }
 
       return buckets.map(b => {
-        if (b.length === 0) return [0, 0, 0];
-        let r = 0, g = 0, bl = 0;
-        for (const c of b) { r += c[0]; g += c[1]; bl += c[2]; }
-        const n = b.length;
-        return [Math.round(r / n), Math.round(g / n), Math.round(bl / n)];
+        if (!b.length) return [0, 0, 0];
+        let tr = 0, tg = 0, tb = 0;
+        for (const s of b) { tr += s[0]; tg += s[1]; tb += s[2]; }
+        return [Math.round(tr / b.length), Math.round(tg / b.length), Math.round(tb / b.length)];
       });
     }
 
-    // ── Contour tracing (marching squares) for a single color ──
-    function traceColorRegion(indexed, w, h, colorIdx) {
-      const visited = new Uint8Array(w * h);
-      const contours = [];
+    // ══════════════════════════════════════════════════════════════
+    // CONTOUR TRACING - Correct Marching Squares
+    // ══════════════════════════════════════════════════════════════
 
-      // Build binary grid: 1 = this color, 0 = not
-      const grid = new Uint8Array((w + 1) * (h + 1)); // padded
+    // Trace contours for a single color index, returning array of point arrays
+    function traceColorContours(indexed, w, h, colorIdx) {
+      // Build binary bitmap: 1 where pixel == colorIdx, with 0 padding border
+      const gw = w + 2, gh = h + 2;
+      const grid = new Uint8Array(gw * gh);
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
-          grid[(y + 1) * (w + 1) + (x + 1)] = indexed[y * w + x] === colorIdx ? 1 : 0;
+          if (indexed[y * w + x] === colorIdx) grid[(y + 1) * gw + (x + 1)] = 1;
         }
       }
-      const gw = w + 1;
 
-      // Find contour start points
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          if (indexed[y * w + x] !== colorIdx) continue;
-          if (visited[y * w + x]) continue;
+      // Track which marching-squares cells have been used as start points
+      const visited = new Uint8Array((gw - 1) * (gh - 1));
+      const contours = [];
+      const cellW = gw - 1;
 
-          // Check if this pixel is on a boundary
-          const isBorder = x === 0 || y === 0 || x === w - 1 || y === h - 1 ||
-            indexed[y * w + x - 1] !== colorIdx ||
-            indexed[y * w + x + 1] !== colorIdx ||
-            indexed[(y - 1) * w + x] !== colorIdx ||
-            indexed[(y + 1) * w + x] !== colorIdx;
+      for (let cy = 0; cy < gh - 1; cy++) {
+        for (let cx = 0; cx < gw - 1; cx++) {
+          const cellIdx = cy * cellW + cx;
+          if (visited[cellIdx]) continue;
+          // Compute marching squares case for this cell
+          const c = msCase(grid, gw, cx, cy);
+          if (c === 0 || c === 15) continue;
 
-          if (!isBorder) {
-            visited[y * w + x] = 1;
-            continue;
-          }
-
-          // March around this contour using marching squares on the padded grid
-          const contour = marchContour(grid, gw, h + 1, x, y);
-          if (contour.length >= 3) {
-            contours.push(contour);
-            // Mark interior pixels as visited (flood fill)
-            floodMark(indexed, visited, w, h, x, y, colorIdx);
+          // March around this contour
+          const pts = marchSquares(grid, gw, gh, cx, cy, visited, cellW);
+          if (pts.length >= 3) {
+            // Shift coordinates: grid is padded by 1, so subtract 1 to get image coords
+            const shifted = pts.map(p => [p[0] - 1, p[1] - 1]);
+            contours.push(shifted);
           }
         }
       }
       return contours;
     }
 
-    function marchContour(grid, gw, gh, startX, startY) {
-      // Marching squares on the padded grid
-      // The cell at (cx, cy) has corners: grid[cy*gw+cx], grid[cy*gw+cx+1], grid[(cy+1)*gw+cx], grid[(cy+1)*gw+cx+1]
-      const points = [];
-      const startCx = startX;
-      const startCy = startY;
+    function msCase(grid, gw, cx, cy) {
+      const tl = grid[cy * gw + cx];
+      const tr = grid[cy * gw + cx + 1];
+      const br = grid[(cy + 1) * gw + cx + 1];
+      const bl = grid[(cy + 1) * gw + cx];
+      return (tl << 3) | (tr << 2) | (br << 1) | bl;
+    }
 
+    function marchSquares(grid, gw, gh, startCx, startCy, visited, cellW) {
+      const points = [];
       let cx = startCx, cy = startCy;
-      let prevDir = -1;
-      const maxIter = gw * gh * 2;
+      let prevStep = null;
+      const maxIter = (gw + gh) * 4;
+      let first = true;
 
       for (let iter = 0; iter < maxIter; iter++) {
-        const tl = cy >= 0 && cx >= 0 ? grid[cy * gw + cx] : 0;
-        const tr = cy >= 0 && cx + 1 < gw ? grid[cy * gw + cx + 1] : 0;
-        const bl = cy + 1 < gh && cx >= 0 ? grid[(cy + 1) * gw + cx] : 0;
-        const br = cy + 1 < gh && cx + 1 < gw ? grid[(cy + 1) * gw + cx + 1] : 0;
-        const cell = (tl << 3) | (tr << 2) | (br << 1) | bl;
+        if (!first && cx === startCx && cy === startCy) break;
+        first = false;
 
-        // Midpoints of cell edges
-        const top = [cx + 0.5, cy];
+        if (cx < 0 || cy < 0 || cx >= gw - 1 || cy >= gh - 1) break;
+
+        visited[cy * cellW + cx] = 1;
+        const c = msCase(grid, gw, cx, cy);
+
+        // Edge midpoints for this cell
+        const top    = [cx + 0.5, cy];
         const bottom = [cx + 0.5, cy + 1];
-        const left = [cx, cy + 0.5];
-        const right = [cx + 1, cy + 0.5];
+        const left   = [cx,       cy + 0.5];
+        const right  = [cx + 1,   cy + 0.5];
 
-        let dir;
-        switch (cell) {
-          case 0: case 15: return points; // no boundary
-          case 1: case 14: points.push(left, bottom); dir = 3; break;    // down
-          case 2: case 13: points.push(bottom, right); dir = 0; break;   // right
-          case 3: case 12: points.push(left, right); dir = 0; break;     // right
-          case 4: case 11: points.push(top, right); dir = 1; break;      // down (right)
-          case 5:  // saddle
-            if (prevDir === 2) { points.push(top, left); dir = 2; }
-            else { points.push(top, right); dir = 0; }
+        // Determine edge point and next step direction
+        // Directions: 0=right, 1=down, 2=left, 3=up
+        let step, point;
+        switch (c) {
+          case  1: point = bottom; step = 2; break;  // ___X -> left
+          case  2: point = right;  step = 1; break;  // __X_ -> down
+          case  3: point = right;  step = 1; break;  // __XX -> down
+          case  4: point = top;    step = 0; break;  // _X__ -> right
+          case  5: // saddle _X_X
+            if (prevStep === 1) { point = left;  step = 2; }
+            else                { point = top;   step = 0; }
             break;
-          case 6: case 9: points.push(top, bottom); dir = 3; break;     // down
-          case 7: case 8: points.push(top, left); dir = 2; break;       // left
-          case 10: // saddle
-            if (prevDir === 3) { points.push(bottom, right); dir = 0; }
-            else { points.push(bottom, left); dir = 2; }
+          case  6: point = top;    step = 0; break;  // _XX_ -> right
+          case  7: point = top;    step = 0; break;  // _XXX -> right
+          case  8: point = left;   step = 3; break;  // X___ -> up
+          case  9: point = bottom; step = 2; break;  // X__X -> left
+          case 10: // saddle X_X_
+            if (prevStep === 0) { point = bottom; step = 2; }
+            else                { point = right;  step = 1; }
             break;
-          default: return points;
+          case 11: point = bottom; step = 2; break;  // X_XX -> left
+          case 12: point = left;   step = 3; break;  // XX__ -> up
+          case 13: point = left;   step = 3; break;  // XX_X -> up
+          case 14: point = right;  step = 1; break;  // XXX_ -> down
+          default: break; // 0 or 15: no contour
         }
 
-        prevDir = dir;
-        // Move to next cell
-        switch (dir) {
-          case 0: cx++; break; // right
-          case 1: cy++; break; // down
-          case 2: cx--; break; // left
-          case 3: cy++; break; // down
-        }
+        if (c === 0 || c === 15) break;
+        points.push(point);
+        prevStep = step;
 
-        if (cx === startCx && cy === startCy && iter > 0) break;
-        if (cx < -1 || cy < -1 || cx >= gw || cy >= gh) break;
+        // Advance to next cell
+        switch (step) {
+          case 0: cx++; break;
+          case 1: cy++; break;
+          case 2: cx--; break;
+          case 3: cy--; break;
+        }
       }
       return points;
     }
 
-    function floodMark(indexed, visited, w, h, sx, sy, colorIdx) {
-      const stack = [[sx, sy]];
-      while (stack.length > 0) {
-        const [x, y] = stack.pop();
-        if (x < 0 || x >= w || y < 0 || y >= h) continue;
-        const idx = y * w + x;
-        if (visited[idx] || indexed[idx] !== colorIdx) continue;
-        visited[idx] = 1;
-        stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+    // ══════════════════════════════════════════════════════════════
+    // OUTLINE MODE - Trace edges between different-colored regions
+    // ══════════════════════════════════════════════════════════════
+    function traceAllEdges(indexed, w, h) {
+      // Build edge grid: a cell is an edge if its 4 corners are not all the same
+      const gw = w + 1, gh = h + 1;
+      // We use the indexed grid directly; pad with -1
+      function px(x, y) {
+        if (x < 0 || x >= w || y < 0 || y >= h) return -1;
+        return indexed[y * w + x];
       }
-    }
 
-    // ── Edge tracing (outline mode) ──
-    function traceEdges(indexed, w, h) {
-      const points = [];
+      const edgeVisited = new Uint8Array(w * h);
+      const chains = [];
+
       for (let y = 0; y < h - 1; y++) {
         for (let x = 0; x < w - 1; x++) {
-          const c = indexed[y * w + x];
-          if (c !== indexed[y * w + x + 1] || c !== indexed[(y + 1) * w + x]) {
-            points.push([x, y]);
+          // Check if there's a color boundary at this cell
+          const c00 = indexed[y * w + x];
+          const c10 = indexed[y * w + x + 1];
+          const c01 = indexed[(y + 1) * w + x];
+          const c11 = indexed[(y + 1) * w + x + 1];
+          if (c00 === c10 && c10 === c01 && c01 === c11) continue;
+          if (edgeVisited[y * w + x]) continue;
+          edgeVisited[y * w + x] = 1;
+
+          // Collect connected edge points using a simple chain walk
+          const chain = [[x + 0.5, y + 0.5]];
+          // Walk in one direction
+          let px2 = x, py2 = y;
+          for (let dir = 0; dir < 2; dir++) {
+            let curX = x, curY = y;
+            for (let step = 0; step < w * h; step++) {
+              let found = false;
+              // Try 4 neighbors
+              for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+                const nx = curX + dx, ny = curY + dy;
+                if (nx < 0 || nx >= w - 1 || ny < 0 || ny >= h - 1) continue;
+                if (edgeVisited[ny * w + nx]) continue;
+                const n00 = indexed[ny * w + nx];
+                const n10 = indexed[ny * w + nx + 1];
+                const n01 = indexed[(ny + 1) * w + nx];
+                const n11 = indexed[(ny + 1) * w + nx + 1];
+                if (n00 === n10 && n10 === n01 && n01 === n11) continue;
+                edgeVisited[ny * w + nx] = 1;
+                if (dir === 0) chain.push([nx + 0.5, ny + 0.5]);
+                else chain.unshift([nx + 0.5, ny + 0.5]);
+                curX = nx; curY = ny;
+                found = true;
+                break;
+              }
+              if (!found) break;
+            }
           }
+          if (chain.length >= 2) chains.push(chain);
         }
       }
-      return points;
+      return chains;
     }
 
-    // ── Path smoothing (Chaikin's corner cutting) ──
+    // ══════════════════════════════════════════════════════════════
+    // PATH SMOOTHING - Chaikin's corner cutting
+    // ══════════════════════════════════════════════════════════════
     function smoothPath(points, amount) {
       if (points.length < 3 || amount === 0) return points;
-      const iterations = Math.round(amount * 3);
+      const iterations = Math.max(1, Math.round(amount * 3));
       let pts = points;
       for (let it = 0; it < iterations; it++) {
+        const n = pts.length;
         const newPts = [];
-        for (let i = 0; i < pts.length - 1; i++) {
-          const p0 = pts[i], p1 = pts[i + 1];
+        for (let i = 0; i < n; i++) {
+          const p0 = pts[i];
+          const p1 = pts[(i + 1) % n];
           newPts.push(
             [0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]],
             [0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]]
-          );
-        }
-        // Close the loop
-        if (pts.length > 2) {
-          const pLast = pts[pts.length - 1], pFirst = pts[0];
-          newPts.push(
-            [0.75 * pLast[0] + 0.25 * pFirst[0], 0.75 * pLast[1] + 0.25 * pFirst[1]],
-            [0.25 * pLast[0] + 0.75 * pFirst[0], 0.25 * pLast[1] + 0.75 * pFirst[1]]
           );
         }
         pts = newPts;
@@ -627,17 +666,20 @@
       return pts;
     }
 
-    // ── SVG path data ──
-    function pathToD(points) {
-      if (points.length === 0) return '';
-      let d = `M${r(points[0][0])} ${r(points[0][1])}`;
+    // ══════════════════════════════════════════════════════════════
+    // SVG PATH BUILDER
+    // ══════════════════════════════════════════════════════════════
+    function buildPathD(points, closed) {
+      if (!points.length) return '';
+      let d = `M${rd(points[0][0])} ${rd(points[0][1])}`;
       for (let i = 1; i < points.length; i++) {
-        d += `L${r(points[i][0])} ${r(points[i][1])}`;
+        d += `L${rd(points[i][0])} ${rd(points[i][1])}`;
       }
+      if (closed) d += 'Z';
       return d;
     }
 
-    function r(v) { return Math.round(v * 100) / 100; }
+    function rd(v) { return Math.round(v * 100) / 100; }
 
     // ── Download ──
     downloadBtn.addEventListener('click', () => {
@@ -655,8 +697,8 @@
     copySvgBtn.addEventListener('click', () => {
       if (!svgString) return;
       navigator.clipboard.writeText(svgString).then(
-        () => setStatus('✅ SVG code copied to clipboard', 'success'),
-        () => setStatus('❌ Failed to copy', 'error')
+        () => setStatus('SVG code copied to clipboard', 'success'),
+        () => setStatus('Failed to copy', 'error')
       );
     });
   </script>
