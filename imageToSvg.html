@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Image to SVG Converter</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Cormorant+Garamond:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --bg2: #16213e;
+      --card: #0f3460;
+      --border: #1a3a6a;
+      --amber: #f5a623;
+      --amber-l: #fbbf24;
+      --txt: #e8e8e8;
+      --txt2: #b0b0b0;
+      --txt3: #707070;
+      --teal: #a8e6cf;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg);
+      color: var(--txt);
+      font-family: 'JetBrains Mono', monospace;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h1 {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 2rem;
+      color: var(--amber);
+      margin: 1.5rem 0 0.5rem;
+      text-align: center;
+    }
+
+    .subtitle {
+      color: var(--txt2);
+      font-size: 0.8rem;
+      margin-bottom: 1.5rem;
+      text-align: center;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 1100px;
+      padding: 0 1.5rem 2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.2rem;
+    }
+
+    /* Drop zone */
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 2.5rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      background: var(--bg2);
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--amber);
+      background: rgba(245, 166, 35, 0.05);
+    }
+    .drop-zone p { color: var(--txt2); font-size: 0.85rem; margin-top: 0.5rem; }
+    .drop-zone .icon { font-size: 2rem; }
+    .drop-zone input { display: none; }
+
+    /* Controls */
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      background: var(--bg2);
+      padding: 1.2rem;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+    }
+    .control-group label {
+      display: block;
+      font-size: 0.75rem;
+      color: var(--txt2);
+      margin-bottom: 0.4rem;
+    }
+    .control-group input[type="range"] {
+      width: 100%;
+      accent-color: var(--amber);
+    }
+    .control-group select {
+      width: 100%;
+      background: var(--card);
+      color: var(--txt);
+      border: 1px solid var(--border);
+      padding: 0.4rem;
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 0.8rem;
+    }
+    .val { color: var(--amber); font-weight: 600; float: right; }
+
+    /* Buttons */
+    .btn-row {
+      display: flex;
+      gap: 0.8rem;
+      flex-wrap: wrap;
+    }
+    .btn {
+      padding: 0.6rem 1.4rem;
+      border: none;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.1s, opacity 0.2s;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.4; cursor: default; }
+    .btn-primary { background: var(--amber); color: #1a1a2e; }
+    .btn-primary:hover:not(:disabled) { background: var(--amber-l); }
+    .btn-secondary { background: var(--card); color: var(--txt); border: 1px solid var(--border); }
+    .btn-secondary:hover:not(:disabled) { background: var(--border); }
+
+    /* Preview area */
+    .preview-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 700px) {
+      .preview-row { grid-template-columns: 1fr; }
+    }
+    .preview-panel {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 300px;
+    }
+    .preview-panel h3 {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 1rem;
+      color: var(--txt2);
+      margin-bottom: 0.8rem;
+    }
+    .preview-panel .img-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      overflow: hidden;
+    }
+    .preview-panel img, .preview-panel svg {
+      max-width: 100%;
+      max-height: 400px;
+      object-fit: contain;
+    }
+    .preview-panel .placeholder {
+      color: var(--txt3);
+      font-size: 0.8rem;
+    }
+
+    /* Status */
+    .status {
+      font-size: 0.8rem;
+      color: var(--txt2);
+      text-align: center;
+      min-height: 1.2em;
+    }
+    .status.error { color: #e05c5c; }
+    .status.success { color: var(--teal); }
+
+    /* Hidden canvas */
+    #workCanvas { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Image → SVG Converter</h1>
+  <p class="subtitle">Drop an image to vectorize it into scalable SVG</p>
+
+  <div class="container">
+    <div class="drop-zone" id="dropZone">
+      <div class="icon">📁</div>
+      <p>Drop image here or click to browse</p>
+      <p>PNG, JPG, GIF, BMP, WebP</p>
+      <input type="file" id="fileInput" accept="image/*">
+    </div>
+
+    <div class="controls">
+      <div class="control-group">
+        <label>Colors <span class="val" id="colorVal">8</span></label>
+        <input type="range" id="colorCount" min="2" max="32" value="8">
+      </div>
+      <div class="control-group">
+        <label>Detail <span class="val" id="detailVal">1.0</span></label>
+        <input type="range" id="detailLevel" min="1" max="10" value="5" step="1">
+      </div>
+      <div class="control-group">
+        <label>Smoothing <span class="val" id="smoothVal">50%</span></label>
+        <input type="range" id="smoothLevel" min="0" max="100" value="50">
+      </div>
+      <div class="control-group">
+        <label>Max Size (px) <span class="val" id="sizeVal">800</span></label>
+        <input type="range" id="maxSize" min="100" max="2000" value="800" step="50">
+      </div>
+      <div class="control-group">
+        <label>Edge Mode</label>
+        <select id="edgeMode">
+          <option value="color">Color Layers</option>
+          <option value="outline">Outline Only</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <label>Background</label>
+        <select id="bgMode">
+          <option value="keep">Keep Background</option>
+          <option value="transparent">Transparent</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="convertBtn" disabled>Convert to SVG</button>
+      <button class="btn btn-secondary" id="downloadBtn" disabled>Download SVG</button>
+      <button class="btn btn-secondary" id="copySvgBtn" disabled>Copy SVG Code</button>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <div class="preview-row">
+      <div class="preview-panel">
+        <h3>Original</h3>
+        <div class="img-wrap" id="origWrap">
+          <span class="placeholder">No image loaded</span>
+        </div>
+      </div>
+      <div class="preview-panel">
+        <h3>SVG Output</h3>
+        <div class="img-wrap" id="svgWrap">
+          <span class="placeholder">Convert to see result</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <canvas id="workCanvas"></canvas>
+
+  <script>
+    // ── State ──
+    let sourceImg = null;
+    let svgString = '';
+
+    // ── DOM refs ──
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const colorCount = document.getElementById('colorCount');
+    const detailLevel = document.getElementById('detailLevel');
+    const smoothLevel = document.getElementById('smoothLevel');
+    const maxSize = document.getElementById('maxSize');
+    const edgeMode = document.getElementById('edgeMode');
+    const bgMode = document.getElementById('bgMode');
+    const convertBtn = document.getElementById('convertBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const copySvgBtn = document.getElementById('copySvgBtn');
+    const status = document.getElementById('status');
+    const origWrap = document.getElementById('origWrap');
+    const svgWrap = document.getElementById('svgWrap');
+    const canvas = document.getElementById('workCanvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    // ── Slider labels ──
+    colorCount.oninput = () => document.getElementById('colorVal').textContent = colorCount.value;
+    detailLevel.oninput = () => {
+      const v = (11 - detailLevel.value) / 5;
+      document.getElementById('detailVal').textContent = v.toFixed(1);
+    };
+    smoothLevel.oninput = () => document.getElementById('smoothVal').textContent = smoothLevel.value + '%';
+    maxSize.oninput = () => document.getElementById('sizeVal').textContent = maxSize.value;
+
+    // ── File loading ──
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', () => { if (fileInput.files.length) loadFile(fileInput.files[0]); });
+
+    function loadFile(file) {
+      if (!file.type.startsWith('image/')) {
+        setStatus('Not a valid image file', 'error');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = e => {
+        const img = new Image();
+        img.onload = () => {
+          sourceImg = img;
+          origWrap.innerHTML = '';
+          origWrap.appendChild(img.cloneNode());
+          convertBtn.disabled = false;
+          setStatus(`✅ Loaded: ${img.naturalWidth}×${img.naturalHeight}`, 'success');
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // ── Status helper ──
+    function setStatus(msg, type = '') {
+      status.textContent = msg;
+      status.className = 'status' + (type ? ' ' + type : '');
+    }
+
+    // ── Convert ──
+    convertBtn.addEventListener('click', () => {
+      if (!sourceImg) return;
+      setStatus('Converting...');
+      // defer to allow status to render
+      requestAnimationFrame(() => setTimeout(convert, 20));
+    });
+
+    function convert() {
+      const t0 = performance.now();
+      const numColors = parseInt(colorCount.value);
+      const detail = (11 - parseInt(detailLevel.value)) / 5; // 2.0 (low detail) to 0.2 (high detail)
+      const smooth = parseInt(smoothLevel.value) / 100;
+      const maxPx = parseInt(maxSize.value);
+      const mode = edgeMode.value;
+      const removeBg = bgMode.value === 'transparent';
+
+      // Scale image
+      let w = sourceImg.naturalWidth;
+      let h = sourceImg.naturalHeight;
+      const ratio = Math.min(maxPx / w, maxPx / h, 1);
+      w = Math.round(w * ratio);
+      h = Math.round(h * ratio);
+
+      // Apply detail: subsample for lower detail
+      const sampW = Math.max(16, Math.round(w / detail));
+      const sampH = Math.max(16, Math.round(h / detail));
+
+      canvas.width = sampW;
+      canvas.height = sampH;
+      ctx.drawImage(sourceImg, 0, 0, sampW, sampH);
+      const imgData = ctx.getImageData(0, 0, sampW, sampH);
+      const pixels = imgData.data;
+
+      // ── Color quantization (median cut) ──
+      const palette = medianCut(pixels, numColors);
+
+      // Map each pixel to nearest palette color
+      const indexed = new Uint8Array(sampW * sampH);
+      for (let i = 0; i < sampW * sampH; i++) {
+        const off = i * 4;
+        const r = pixels[off], g = pixels[off + 1], b = pixels[off + 2];
+        let bestD = Infinity, bestIdx = 0;
+        for (let c = 0; c < palette.length; c++) {
+          const dr = r - palette[c][0], dg = g - palette[c][1], db = b - palette[c][2];
+          const d = dr * dr + dg * dg + db * db;
+          if (d < bestD) { bestD = d; bestIdx = c; }
+        }
+        indexed[i] = bestIdx;
+      }
+
+      // Determine background color index (most common color in border pixels)
+      let bgColorIdx = 0;
+      if (removeBg) {
+        const borderCount = new Uint32Array(palette.length);
+        for (let x = 0; x < sampW; x++) {
+          borderCount[indexed[x]]++;
+          borderCount[indexed[(sampH - 1) * sampW + x]]++;
+        }
+        for (let y = 0; y < sampH; y++) {
+          borderCount[indexed[y * sampW]]++;
+          borderCount[indexed[y * sampW + sampW - 1]]++;
+        }
+        bgColorIdx = borderCount.indexOf(Math.max(...borderCount));
+      }
+
+      // ── Trace contours for each color layer ──
+      let paths = '';
+      const scaleX = w / sampW;
+      const scaleY = h / sampH;
+
+      if (mode === 'outline') {
+        // Outline mode: trace edges between any two different colors
+        const edges = traceEdges(indexed, sampW, sampH);
+        const smoothed = smooth > 0 ? smoothPath(edges, smooth) : edges;
+        const scaled = smoothed.map(p => [p[0] * scaleX, p[1] * scaleY]);
+        if (scaled.length > 1) {
+          paths += `<path d="${pathToD(scaled)}" fill="none" stroke="#000" stroke-width="1.5"/>\n`;
+        }
+      } else {
+        // Color layers mode
+        for (let c = 0; c < palette.length; c++) {
+          if (removeBg && c === bgColorIdx) continue;
+          const contours = traceColorRegion(indexed, sampW, sampH, c);
+          const [r, g, b] = palette[c];
+          const hex = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+          for (const contour of contours) {
+            if (contour.length < 3) continue;
+            const smoothed = smooth > 0 ? smoothPath(contour, smooth) : contour;
+            const scaled = smoothed.map(p => [p[0] * scaleX, p[1] * scaleY]);
+            paths += `<path d="${pathToD(scaled)}Z" fill="${hex}" stroke="${hex}" stroke-width="0.5" stroke-linejoin="round"/>\n`;
+          }
+        }
+      }
+
+      svgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">\n${paths}</svg>`;
+
+      // Show preview
+      svgWrap.innerHTML = svgString;
+      downloadBtn.disabled = false;
+      copySvgBtn.disabled = false;
+
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+      const svgKb = (new Blob([svgString]).size / 1024).toFixed(1);
+      setStatus(`✅ Done in ${elapsed}s — ${svgKb} KB — ${palette.length} colors`, 'success');
+    }
+
+    // ── Median Cut color quantization ──
+    function medianCut(pixels, numColors) {
+      // Collect unique-ish color samples
+      const samples = [];
+      const step = Math.max(1, Math.floor(pixels.length / 4 / 10000));
+      for (let i = 0; i < pixels.length; i += 4 * step) {
+        samples.push([pixels[i], pixels[i + 1], pixels[i + 2]]);
+      }
+
+      let buckets = [samples];
+      while (buckets.length < numColors) {
+        // Find bucket with largest range in any channel
+        let bestBi = 0, bestRange = -1, bestCh = 0;
+        for (let bi = 0; bi < buckets.length; bi++) {
+          const b = buckets[bi];
+          if (b.length < 2) continue;
+          for (let ch = 0; ch < 3; ch++) {
+            let mn = 255, mx = 0;
+            for (const c of b) { mn = Math.min(mn, c[ch]); mx = Math.max(mx, c[ch]); }
+            const range = mx - mn;
+            if (range > bestRange) { bestRange = range; bestBi = bi; bestCh = ch; }
+          }
+        }
+        if (bestRange <= 0) break;
+        const bucket = buckets[bestBi];
+        bucket.sort((a, b) => a[bestCh] - b[bestCh]);
+        const mid = Math.floor(bucket.length / 2);
+        buckets.splice(bestBi, 1, bucket.slice(0, mid), bucket.slice(mid));
+      }
+
+      return buckets.map(b => {
+        if (b.length === 0) return [0, 0, 0];
+        let r = 0, g = 0, bl = 0;
+        for (const c of b) { r += c[0]; g += c[1]; bl += c[2]; }
+        const n = b.length;
+        return [Math.round(r / n), Math.round(g / n), Math.round(bl / n)];
+      });
+    }
+
+    // ── Contour tracing (marching squares) for a single color ──
+    function traceColorRegion(indexed, w, h, colorIdx) {
+      const visited = new Uint8Array(w * h);
+      const contours = [];
+
+      // Build binary grid: 1 = this color, 0 = not
+      const grid = new Uint8Array((w + 1) * (h + 1)); // padded
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          grid[(y + 1) * (w + 1) + (x + 1)] = indexed[y * w + x] === colorIdx ? 1 : 0;
+        }
+      }
+      const gw = w + 1;
+
+      // Find contour start points
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (indexed[y * w + x] !== colorIdx) continue;
+          if (visited[y * w + x]) continue;
+
+          // Check if this pixel is on a boundary
+          const isBorder = x === 0 || y === 0 || x === w - 1 || y === h - 1 ||
+            indexed[y * w + x - 1] !== colorIdx ||
+            indexed[y * w + x + 1] !== colorIdx ||
+            indexed[(y - 1) * w + x] !== colorIdx ||
+            indexed[(y + 1) * w + x] !== colorIdx;
+
+          if (!isBorder) {
+            visited[y * w + x] = 1;
+            continue;
+          }
+
+          // March around this contour using marching squares on the padded grid
+          const contour = marchContour(grid, gw, h + 1, x, y);
+          if (contour.length >= 3) {
+            contours.push(contour);
+            // Mark interior pixels as visited (flood fill)
+            floodMark(indexed, visited, w, h, x, y, colorIdx);
+          }
+        }
+      }
+      return contours;
+    }
+
+    function marchContour(grid, gw, gh, startX, startY) {
+      // Marching squares on the padded grid
+      // The cell at (cx, cy) has corners: grid[cy*gw+cx], grid[cy*gw+cx+1], grid[(cy+1)*gw+cx], grid[(cy+1)*gw+cx+1]
+      const points = [];
+      const startCx = startX;
+      const startCy = startY;
+
+      let cx = startCx, cy = startCy;
+      let prevDir = -1;
+      const maxIter = gw * gh * 2;
+
+      for (let iter = 0; iter < maxIter; iter++) {
+        const tl = cy >= 0 && cx >= 0 ? grid[cy * gw + cx] : 0;
+        const tr = cy >= 0 && cx + 1 < gw ? grid[cy * gw + cx + 1] : 0;
+        const bl = cy + 1 < gh && cx >= 0 ? grid[(cy + 1) * gw + cx] : 0;
+        const br = cy + 1 < gh && cx + 1 < gw ? grid[(cy + 1) * gw + cx + 1] : 0;
+        const cell = (tl << 3) | (tr << 2) | (br << 1) | bl;
+
+        // Midpoints of cell edges
+        const top = [cx + 0.5, cy];
+        const bottom = [cx + 0.5, cy + 1];
+        const left = [cx, cy + 0.5];
+        const right = [cx + 1, cy + 0.5];
+
+        let dir;
+        switch (cell) {
+          case 0: case 15: return points; // no boundary
+          case 1: case 14: points.push(left, bottom); dir = 3; break;    // down
+          case 2: case 13: points.push(bottom, right); dir = 0; break;   // right
+          case 3: case 12: points.push(left, right); dir = 0; break;     // right
+          case 4: case 11: points.push(top, right); dir = 1; break;      // down (right)
+          case 5:  // saddle
+            if (prevDir === 2) { points.push(top, left); dir = 2; }
+            else { points.push(top, right); dir = 0; }
+            break;
+          case 6: case 9: points.push(top, bottom); dir = 3; break;     // down
+          case 7: case 8: points.push(top, left); dir = 2; break;       // left
+          case 10: // saddle
+            if (prevDir === 3) { points.push(bottom, right); dir = 0; }
+            else { points.push(bottom, left); dir = 2; }
+            break;
+          default: return points;
+        }
+
+        prevDir = dir;
+        // Move to next cell
+        switch (dir) {
+          case 0: cx++; break; // right
+          case 1: cy++; break; // down
+          case 2: cx--; break; // left
+          case 3: cy++; break; // down
+        }
+
+        if (cx === startCx && cy === startCy && iter > 0) break;
+        if (cx < -1 || cy < -1 || cx >= gw || cy >= gh) break;
+      }
+      return points;
+    }
+
+    function floodMark(indexed, visited, w, h, sx, sy, colorIdx) {
+      const stack = [[sx, sy]];
+      while (stack.length > 0) {
+        const [x, y] = stack.pop();
+        if (x < 0 || x >= w || y < 0 || y >= h) continue;
+        const idx = y * w + x;
+        if (visited[idx] || indexed[idx] !== colorIdx) continue;
+        visited[idx] = 1;
+        stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+      }
+    }
+
+    // ── Edge tracing (outline mode) ──
+    function traceEdges(indexed, w, h) {
+      const points = [];
+      for (let y = 0; y < h - 1; y++) {
+        for (let x = 0; x < w - 1; x++) {
+          const c = indexed[y * w + x];
+          if (c !== indexed[y * w + x + 1] || c !== indexed[(y + 1) * w + x]) {
+            points.push([x, y]);
+          }
+        }
+      }
+      return points;
+    }
+
+    // ── Path smoothing (Chaikin's corner cutting) ──
+    function smoothPath(points, amount) {
+      if (points.length < 3 || amount === 0) return points;
+      const iterations = Math.round(amount * 3);
+      let pts = points;
+      for (let it = 0; it < iterations; it++) {
+        const newPts = [];
+        for (let i = 0; i < pts.length - 1; i++) {
+          const p0 = pts[i], p1 = pts[i + 1];
+          newPts.push(
+            [0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]],
+            [0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]]
+          );
+        }
+        // Close the loop
+        if (pts.length > 2) {
+          const pLast = pts[pts.length - 1], pFirst = pts[0];
+          newPts.push(
+            [0.75 * pLast[0] + 0.25 * pFirst[0], 0.75 * pLast[1] + 0.25 * pFirst[1]],
+            [0.25 * pLast[0] + 0.75 * pFirst[0], 0.25 * pLast[1] + 0.75 * pFirst[1]]
+          );
+        }
+        pts = newPts;
+      }
+      return pts;
+    }
+
+    // ── SVG path data ──
+    function pathToD(points) {
+      if (points.length === 0) return '';
+      let d = `M${r(points[0][0])} ${r(points[0][1])}`;
+      for (let i = 1; i < points.length; i++) {
+        d += `L${r(points[i][0])} ${r(points[i][1])}`;
+      }
+      return d;
+    }
+
+    function r(v) { return Math.round(v * 100) / 100; }
+
+    // ── Download ──
+    downloadBtn.addEventListener('click', () => {
+      if (!svgString) return;
+      const blob = new Blob([svgString], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'vectorized.svg';
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    // ── Copy SVG ──
+    copySvgBtn.addEventListener('click', () => {
+      if (!svgString) return;
+      navigator.clipboard.writeText(svgString).then(
+        () => setStatus('✅ SVG code copied to clipboard', 'success'),
+        () => setStatus('❌ Failed to copy', 'error')
+      );
+    });
+  </script>
+</body>
+</html>
