@@ -398,14 +398,13 @@
       let paths = '';
 
       if (mode === 'outline') {
-        // Outline mode: trace edges between different color regions
-        const edgePaths = traceAllEdges(indexed, sampW, sampH);
-        for (const pts of edgePaths) {
-          if (pts.length < 2) continue;
-          const smoothed = smooth > 0 ? smoothPath(pts, smooth) : pts;
-          const scaled = smoothed.map(p => [p[0] * scaleX, p[1] * scaleY]);
-          paths += `<path d="${buildPathD(scaled, false)}" fill="none" stroke="#000" stroke-width="1.5"/>\n`;
+        // Outline mode: all boundary edges as a single path
+        const segments = traceAllEdges(indexed, sampW, sampH);
+        let d = '';
+        for (const [x1, y1, x2, y2] of segments) {
+          d += `M${rd(x1 * scaleX)} ${rd(y1 * scaleY)}L${rd(x2 * scaleX)} ${rd(y2 * scaleY)}`;
         }
+        if (d) paths += `<path d="${d}" fill="none" stroke="#000" stroke-width="1"/>\n`;
       } else {
         // Color layers: trace each color as filled regions
         for (let c = 0; c < palette.length; c++) {
@@ -415,7 +414,9 @@
           const hex = '#' + ((1 << 24) + (cr << 16) + (cg << 8) + cb).toString(16).slice(1);
           for (const region of regions) {
             if (region.length < 3) continue;
-            const smoothed = smooth > 0 ? smoothPath(region, smooth) : region;
+            // Remove collinear points, then optionally smooth
+            let simplified = simplifyContour(region);
+            const smoothed = smooth > 0 ? smoothPath(simplified, smooth) : simplified;
             const scaled = smoothed.map(p => [p[0] * scaleX, p[1] * scaleY]);
             paths += `<path d="${buildPathD(scaled, true)}" fill="${hex}" stroke="${hex}" stroke-width="0.5" stroke-linejoin="round"/>\n`;
           }
@@ -472,183 +473,131 @@
     }
 
     // ══════════════════════════════════════════════════════════════
-    // CONTOUR TRACING - Correct Marching Squares
+    // CONTOUR TRACING - Pixel Boundary Edge Method
     // ══════════════════════════════════════════════════════════════
+    // For each color, collect directed edges along pixel boundaries,
+    // then chain them into closed loops using the right-hand rule.
 
-    // Trace contours for a single color index, returning array of point arrays
     function traceColorContours(indexed, w, h, colorIdx) {
-      // Build binary bitmap: 1 where pixel == colorIdx, with 0 padding border
-      const gw = w + 2, gh = h + 2;
-      const grid = new Uint8Array(gw * gh);
+      function isColor(x, y) {
+        return x >= 0 && x < w && y >= 0 && y < h && indexed[y * w + x] === colorIdx;
+      }
+
+      // Vertex grid is (w+1) x (h+1). For each vertex, store outgoing
+      // directed edge directions as a bitmask.
+      // Directions: bit0=right(+x), bit1=down(+y), bit2=left(-x), bit3=up(-y)
+      const vw = w + 1, vh = h + 1;
+      const outgoing = new Uint8Array(vw * vh);
+
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
-          if (indexed[y * w + x] === colorIdx) grid[(y + 1) * gw + (x + 1)] = 1;
+          if (!isColor(x, y)) continue;
+          // Top edge: vertex(x,y)→vertex(x+1,y) [right] if no color above
+          if (!isColor(x, y - 1)) outgoing[y * vw + x] |= 1;
+          // Right edge: vertex(x+1,y)→vertex(x+1,y+1) [down] if no color right
+          if (!isColor(x + 1, y)) outgoing[y * vw + (x + 1)] |= 2;
+          // Bottom edge: vertex(x+1,y+1)→vertex(x,y+1) [left] if no color below
+          if (!isColor(x, y + 1)) outgoing[(y + 1) * vw + (x + 1)] |= 4;
+          // Left edge: vertex(x,y+1)→vertex(x,y) [up] if no color left
+          if (!isColor(x - 1, y)) outgoing[(y + 1) * vw + x] |= 8;
         }
       }
 
-      // Track which marching-squares cells have been used as start points
-      const visited = new Uint8Array((gw - 1) * (gh - 1));
+      const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1];
       const contours = [];
-      const cellW = gw - 1;
+      const maxSteps = 4 * w * h + 4;
 
-      for (let cy = 0; cy < gh - 1; cy++) {
-        for (let cx = 0; cx < gw - 1; cx++) {
-          const cellIdx = cy * cellW + cx;
-          if (visited[cellIdx]) continue;
-          // Compute marching squares case for this cell
-          const c = msCase(grid, gw, cx, cy);
-          if (c === 0 || c === 15) continue;
+      for (let vy = 0; vy < vh; vy++) {
+        for (let vx = 0; vx < vw; vx++) {
+          while (outgoing[vy * vw + vx]) {
+            // Find first available start direction
+            let dir = -1;
+            const avail = outgoing[vy * vw + vx];
+            for (let d = 0; d < 4; d++) {
+              if (avail & (1 << d)) { dir = d; break; }
+            }
+            if (dir === -1) break;
 
-          // March around this contour
-          const pts = marchSquares(grid, gw, gh, cx, cy, visited, cellW);
-          if (pts.length >= 3) {
-            // Shift coordinates: grid is padded by 1, so subtract 1 to get image coords
-            const shifted = pts.map(p => [p[0] - 1, p[1] - 1]);
-            contours.push(shifted);
+            const pts = [];
+            let cx = vx, cy = vy;
+            const sx = vx, sy = vy;
+
+            for (let step = 0; step < maxSteps; step++) {
+              pts.push([cx, cy]);
+              // Remove this edge from outgoing
+              outgoing[cy * vw + cx] &= ~(1 << dir);
+              // Move to next vertex
+              cx += DX[dir]; cy += DY[dir];
+
+              if (cx === sx && cy === sy) break; // closed loop
+
+              // Pick next direction: right-hand rule
+              // Priority: right turn, straight, left turn, U-turn
+              const a = outgoing[cy * vw + cx];
+              if (!a) break;
+              let nextDir = -1;
+              const pri = [(dir + 1) % 4, dir, (dir + 3) % 4, (dir + 2) % 4];
+              for (const d of pri) {
+                if (a & (1 << d)) { nextDir = d; break; }
+              }
+              if (nextDir === -1) break;
+              dir = nextDir;
+            }
+
+            if (pts.length >= 3) contours.push(pts);
           }
         }
       }
       return contours;
     }
 
-    function msCase(grid, gw, cx, cy) {
-      const tl = grid[cy * gw + cx];
-      const tr = grid[cy * gw + cx + 1];
-      const br = grid[(cy + 1) * gw + cx + 1];
-      const bl = grid[(cy + 1) * gw + cx];
-      return (tl << 3) | (tr << 2) | (br << 1) | bl;
-    }
-
-    function marchSquares(grid, gw, gh, startCx, startCy, visited, cellW) {
-      const points = [];
-      let cx = startCx, cy = startCy;
-      let prevStep = null;
-      const maxIter = (gw + gh) * 4;
-      let first = true;
-
-      for (let iter = 0; iter < maxIter; iter++) {
-        if (!first && cx === startCx && cy === startCy) break;
-        first = false;
-
-        if (cx < 0 || cy < 0 || cx >= gw - 1 || cy >= gh - 1) break;
-
-        visited[cy * cellW + cx] = 1;
-        const c = msCase(grid, gw, cx, cy);
-
-        // Edge midpoints for this cell
-        const top    = [cx + 0.5, cy];
-        const bottom = [cx + 0.5, cy + 1];
-        const left   = [cx,       cy + 0.5];
-        const right  = [cx + 1,   cy + 0.5];
-
-        // Determine edge point and next step direction
-        // Directions: 0=right, 1=down, 2=left, 3=up
-        let step, point;
-        switch (c) {
-          case  1: point = bottom; step = 2; break;  // ___X -> left
-          case  2: point = right;  step = 1; break;  // __X_ -> down
-          case  3: point = right;  step = 1; break;  // __XX -> down
-          case  4: point = top;    step = 0; break;  // _X__ -> right
-          case  5: // saddle _X_X
-            if (prevStep === 1) { point = left;  step = 2; }
-            else                { point = top;   step = 0; }
-            break;
-          case  6: point = top;    step = 0; break;  // _XX_ -> right
-          case  7: point = top;    step = 0; break;  // _XXX -> right
-          case  8: point = left;   step = 3; break;  // X___ -> up
-          case  9: point = bottom; step = 2; break;  // X__X -> left
-          case 10: // saddle X_X_
-            if (prevStep === 0) { point = bottom; step = 2; }
-            else                { point = right;  step = 1; }
-            break;
-          case 11: point = bottom; step = 2; break;  // X_XX -> left
-          case 12: point = left;   step = 3; break;  // XX__ -> up
-          case 13: point = left;   step = 3; break;  // XX_X -> up
-          case 14: point = right;  step = 1; break;  // XXX_ -> down
-          default: break; // 0 or 15: no contour
-        }
-
-        if (c === 0 || c === 15) break;
-        points.push(point);
-        prevStep = step;
-
-        // Advance to next cell
-        switch (step) {
-          case 0: cx++; break;
-          case 1: cy++; break;
-          case 2: cx--; break;
-          case 3: cy--; break;
-        }
+    // Remove collinear points from a closed contour
+    function simplifyContour(pts) {
+      if (pts.length < 3) return pts;
+      const n = pts.length;
+      const keep = [];
+      for (let i = 0; i < n; i++) {
+        const prev = pts[(i - 1 + n) % n];
+        const curr = pts[i];
+        const next = pts[(i + 1) % n];
+        // Cross product: non-zero means direction change (corner)
+        const cross = (curr[0] - prev[0]) * (next[1] - prev[1])
+                    - (curr[1] - prev[1]) * (next[0] - prev[0]);
+        if (Math.abs(cross) > 0.001) keep.push(curr);
       }
-      return points;
+      return keep.length >= 3 ? keep : pts;
     }
 
     // ══════════════════════════════════════════════════════════════
-    // OUTLINE MODE - Trace edges between different-colored regions
+    // OUTLINE MODE - All color boundary edges as line segments
     // ══════════════════════════════════════════════════════════════
     function traceAllEdges(indexed, w, h) {
-      // Build edge grid: a cell is an edge if its 4 corners are not all the same
-      const gw = w + 1, gh = h + 1;
-      // We use the indexed grid directly; pad with -1
-      function px(x, y) {
-        if (x < 0 || x >= w || y < 0 || y >= h) return -1;
-        return indexed[y * w + x];
-      }
-
-      const edgeVisited = new Uint8Array(w * h);
-      const chains = [];
-
-      for (let y = 0; y < h - 1; y++) {
-        for (let x = 0; x < w - 1; x++) {
-          // Check if there's a color boundary at this cell
-          const c00 = indexed[y * w + x];
-          const c10 = indexed[y * w + x + 1];
-          const c01 = indexed[(y + 1) * w + x];
-          const c11 = indexed[(y + 1) * w + x + 1];
-          if (c00 === c10 && c10 === c01 && c01 === c11) continue;
-          if (edgeVisited[y * w + x]) continue;
-          edgeVisited[y * w + x] = 1;
-
-          // Collect connected edge points using a simple chain walk
-          const chain = [[x + 0.5, y + 0.5]];
-          // Walk in one direction
-          let px2 = x, py2 = y;
-          for (let dir = 0; dir < 2; dir++) {
-            let curX = x, curY = y;
-            for (let step = 0; step < w * h; step++) {
-              let found = false;
-              // Try 4 neighbors
-              for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-                const nx = curX + dx, ny = curY + dy;
-                if (nx < 0 || nx >= w - 1 || ny < 0 || ny >= h - 1) continue;
-                if (edgeVisited[ny * w + nx]) continue;
-                const n00 = indexed[ny * w + nx];
-                const n10 = indexed[ny * w + nx + 1];
-                const n01 = indexed[(ny + 1) * w + nx];
-                const n11 = indexed[(ny + 1) * w + nx + 1];
-                if (n00 === n10 && n10 === n01 && n01 === n11) continue;
-                edgeVisited[ny * w + nx] = 1;
-                if (dir === 0) chain.push([nx + 0.5, ny + 0.5]);
-                else chain.unshift([nx + 0.5, ny + 0.5]);
-                curX = nx; curY = ny;
-                found = true;
-                break;
-              }
-              if (!found) break;
-            }
+      // Collect all boundary edge segments between differently-colored pixels
+      // Return as a single array of [x1,y1,x2,y2] segments
+      const segments = [];
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const c = indexed[y * w + x];
+          // Vertical edge between (x,y) and (x+1,y) if right neighbor differs
+          if (x + 1 < w && indexed[y * w + x + 1] !== c) {
+            segments.push([x + 1, y, x + 1, y + 1]);
           }
-          if (chain.length >= 2) chains.push(chain);
+          // Horizontal edge between (x,y) and (x,y+1) if bottom neighbor differs
+          if (y + 1 < h && indexed[(y + 1) * w + x] !== c) {
+            segments.push([x, y + 1, x + 1, y + 1]);
+          }
         }
       }
-      return chains;
+      return segments;
     }
 
     // ══════════════════════════════════════════════════════════════
-    // PATH SMOOTHING - Chaikin's corner cutting
+    // PATH SMOOTHING - Chaikin's corner cutting (closed paths)
     // ══════════════════════════════════════════════════════════════
     function smoothPath(points, amount) {
       if (points.length < 3 || amount === 0) return points;
-      const iterations = Math.max(1, Math.round(amount * 3));
+      // Limit iterations to avoid point count explosion
+      const iterations = Math.max(1, Math.min(2, Math.round(amount * 2)));
       let pts = points;
       for (let it = 0; it < iterations; it++) {
         const n = pts.length;
