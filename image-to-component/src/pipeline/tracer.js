@@ -1,19 +1,17 @@
 /**
- * VTracer wrapper — uses the real vtracer WASM BinaryImageConverter for each color layer.
+ * VTracer wrapper — uses the official vtracer-webapp WASM module with full color support.
  *
- * Color tracing works by:
- *   1. Quantizing the image into N color layers (median-cut)
- *   2. Creating a binary mask for each color
- *   3. Running vtracer's BinaryImageConverter on each mask
- *   4. Combining all traced paths with fill colors into a single SVG
- *
- * This is how vtracer's color mode actually works internally.
+ * The ColorImageConverter reads pixels from a canvas element and writes SVG paths
+ * directly to an SVG DOM element. This is the same engine that powers vtracer.org.
  */
+
+import { ColorImageConverter } from 'vtracer-webapp';
 
 export const PRESETS = {
   photograph: {
     label: 'Equipment Photo',
     description: 'High-res photo of real equipment',
+    mode: 'spline',
     filterSpeckle: 4,
     colorPrecision: 6,
     layerDifference: 16,
@@ -22,11 +20,11 @@ export const PRESETS = {
     maxIterations: 10,
     spliceThreshold: 45,
     pathPrecision: 3,
-    mode: 'spline',
   },
   diagram: {
     label: 'Technical Diagram',
     description: 'Clean illustration or P&ID symbol',
+    mode: 'spline',
     filterSpeckle: 2,
     colorPrecision: 4,
     layerDifference: 24,
@@ -35,11 +33,11 @@ export const PRESETS = {
     maxIterations: 5,
     spliceThreshold: 60,
     pathPrecision: 2,
-    mode: 'spline',
   },
   highContrast: {
     label: 'High Contrast / Icon',
     description: 'Simple shapes, few colors, crisp edges',
+    mode: 'polygon',
     filterSpeckle: 8,
     colorPrecision: 3,
     layerDifference: 32,
@@ -48,274 +46,89 @@ export const PRESETS = {
     maxIterations: 4,
     spliceThreshold: 90,
     pathPrecision: 2,
-    mode: 'polygon',
   },
 };
 
 /**
- * Trace an image to SVG using vtracer's BinaryImageConverter (WASM).
+ * Trace an image to SVG using vtracer's ColorImageConverter (WASM).
  * @param {File} imageFile
- * @param {object} options
+ * @param {object} options - from PRESETS or custom settings
  * @returns {Promise<string>} SVG string
  */
 export async function traceImage(imageFile, options = PRESETS.photograph) {
-  // Load image into canvas to get pixel data
+  // Load image into a temporary canvas
   const imageBitmap = await createImageBitmap(imageFile);
+  const canvasId = '__vtracer_canvas_' + Date.now();
+  const svgId = '__vtracer_svg_' + Date.now();
+
+  // Create temporary DOM elements (vtracer reads/writes via DOM element IDs)
   const canvas = document.createElement('canvas');
+  canvas.id = canvasId;
   canvas.width = imageBitmap.width;
   canvas.height = imageBitmap.height;
+  canvas.style.position = 'absolute';
+  canvas.style.left = '-9999px';
+  canvas.style.top = '-9999px';
+  document.body.appendChild(canvas);
+
   const ctx = canvas.getContext('2d');
   ctx.drawImage(imageBitmap, 0, 0);
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-  // Try to load the real vtracer WASM module
-  let BinaryImageConverter;
+  const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svgEl.id = svgId;
+  svgEl.style.position = 'absolute';
+  svgEl.style.left = '-9999px';
+  svgEl.style.top = '-9999px';
+  document.body.appendChild(svgEl);
+
   try {
-    const mod = await import('vectortracer');
-    BinaryImageConverter = mod.BinaryImageConverter || mod.default?.BinaryImageConverter;
-  } catch (err) {
-    console.error('Failed to load vectortracer WASM:', err);
-  }
+    // Build params — vtracer expects specific value transformations
+    const params = JSON.stringify({
+      canvas_id: canvasId,
+      svg_id: svgId,
+      mode: options.mode || 'spline',
+      clustering_mode: 'color',
+      hierarchical: 'stacked',
+      filter_speckle: (options.filterSpeckle ?? 4) * (options.filterSpeckle ?? 4), // squared
+      color_precision: 8 - (options.colorPrecision ?? 6), // inverted
+      layer_difference: options.layerDifference ?? 16,
+      corner_threshold: (options.cornerThreshold ?? 60) * Math.PI / 180, // degrees → radians
+      splice_threshold: (options.spliceThreshold ?? 45) * Math.PI / 180, // degrees → radians
+      length_threshold: options.lengthThreshold ?? 4.0,
+      max_iterations: options.maxIterations ?? 10,
+      path_precision: options.pathPrecision ?? 3,
+    });
 
-  if (!BinaryImageConverter) {
-    throw new Error(
-      'VTracer WASM module failed to load. The vectortracer package may not be installed correctly.'
-    );
-  }
+    const converter = ColorImageConverter.new_with_string(params);
+    converter.init();
 
-  return traceColorImage(imageData, canvas.width, canvas.height, options, BinaryImageConverter);
-}
-
-/**
- * Color tracing: quantize → binary layers → vtracer each layer → combine.
- */
-function traceColorImage(imageData, width, height, options, BinaryImageConverter) {
-  const { data } = imageData;
-
-  // Step 1: Quantize colors using median-cut
-  const maxColors = Math.pow(2, Math.min(options.colorPrecision || 6, 8));
-  const layerDiff = options.layerDifference || 16;
-  const colors = medianCutQuantize(data, width, height, maxColors, layerDiff);
-
-  console.log(`🎨 Quantized to ${colors.length} color layers`);
-
-  // Step 2: For each color, create a binary mask and trace it
-  const svgPaths = [];
-
-  for (let i = 0; i < colors.length; i++) {
-    const color = colors[i];
-    const binaryImageData = createBinaryMask(data, width, height, color, layerDiff);
-
-    try {
-      const svgFragment = traceBinaryLayer(
-        binaryImageData,
-        width,
-        height,
-        options,
-        BinaryImageConverter,
-        color
-      );
-      if (svgFragment) {
-        svgPaths.push(svgFragment);
-      }
-    } catch (err) {
-      console.warn(`⚠️ Failed to trace layer ${i} (${rgbString(color)}):`, err.message);
-    }
-  }
-
-  console.log(`✅ VTracer traced ${svgPaths.length} color layers`);
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">\n${svgPaths.join('\n')}\n</svg>`;
-}
-
-/**
- * Create a binary mask ImageData for pixels matching the given color.
- */
-function createBinaryMask(data, width, height, color, tolerance) {
-  const mask = new ImageData(width, height);
-  const maskData = mask.data;
-
-  for (let i = 0; i < data.length; i += 4) {
-    const dr = Math.abs(data[i] - color.r);
-    const dg = Math.abs(data[i + 1] - color.g);
-    const db = Math.abs(data[i + 2] - color.b);
-    const a = data[i + 3];
-
-    if (a > 128 && dr <= tolerance && dg <= tolerance && db <= tolerance) {
-      // White = foreground in the mask
-      maskData[i] = 255;
-      maskData[i + 1] = 255;
-      maskData[i + 2] = 255;
-      maskData[i + 3] = 255;
-    } else {
-      // Black = background
-      maskData[i] = 0;
-      maskData[i + 1] = 0;
-      maskData[i + 2] = 0;
-      maskData[i + 3] = 255;
-    }
-  }
-
-  return mask;
-}
-
-/**
- * Run vtracer's BinaryImageConverter on a single binary mask layer.
- * Returns SVG path elements with the fill color applied.
- */
-function traceBinaryLayer(binaryImageData, width, height, options, BinaryImageConverter, color) {
-  const converterParams = {
-    mode: options.mode || 'spline',
-    cornerThreshold: options.cornerThreshold ?? 60,
-    lengthThreshold: options.lengthThreshold ?? 4.0,
-    maxIterations: options.maxIterations ?? 10,
-    spliceThreshold: options.spliceThreshold ?? 45,
-    filterSpeckle: options.filterSpeckle ?? 4,
-    pathPrecision: options.pathPrecision ?? 3,
-  };
-
-  const converterOptions = {
-    invert: false,
-    pathFill: rgbString(color),
-  };
-
-  const converter = new BinaryImageConverter(binaryImageData, converterParams, converterOptions);
-  converter.init();
-
-  // Run the converter to completion
-  let maxTicks = 10000;
-  while (!converter.tick() && maxTicks-- > 0) {
+    // Run the converter to completion using tick()
     // tick() returns true when done
-  }
-
-  const result = converter.getResult();
-  converter.free();
-
-  if (!result || result.trim().length === 0) {
-    return null;
-  }
-
-  // The result is an SVG string — extract just the path/group elements
-  // vtracer returns a full <svg> element, we need just the inner paths
-  const innerContent = extractSvgContent(result, color);
-  return innerContent;
-}
-
-/**
- * Extract path elements from vtracer SVG output and apply fill color.
- */
-function extractSvgContent(svgString, color) {
-  const fill = rgbString(color);
-
-  // Parse the SVG to extract paths
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(svgString, 'image/svg+xml');
-  const svg = doc.querySelector('svg');
-
-  if (!svg) {
-    // If it's not wrapped in <svg>, it might be raw path data
-    return `<g fill="${fill}">${svgString}</g>`;
-  }
-
-  // Get all path/polygon/polyline elements
-  const elements = svg.querySelectorAll('path, polygon, polyline, rect, circle, ellipse');
-  if (elements.length === 0) return null;
-
-  const paths = [];
-  for (const el of elements) {
-    // Override fill color to match our quantized color
-    el.setAttribute('fill', fill);
-    el.removeAttribute('stroke');
-    paths.push(el.outerHTML);
-  }
-
-  return `<g fill="${fill}">\n${paths.join('\n')}\n</g>`;
-}
-
-// ─── Color Quantization (Median Cut) ──────────────────────────────────────────
-
-function medianCutQuantize(data, width, height, maxColors, layerDiff) {
-  // Collect unique pixel colors (sampled for performance)
-  const sampleStep = Math.max(1, Math.floor((width * height) / 50000));
-  const pixels = [];
-
-  for (let i = 0; i < data.length; i += 4 * sampleStep) {
-    if (data[i + 3] > 128) {
-      pixels.push({ r: data[i], g: data[i + 1], b: data[i + 2] });
-    }
-  }
-
-  if (pixels.length === 0) return [];
-
-  // Median cut
-  let buckets = [pixels];
-
-  while (buckets.length < maxColors) {
-    // Find the bucket with the widest color range
-    let widestIdx = 0;
-    let widestRange = -1;
-
-    for (let i = 0; i < buckets.length; i++) {
-      const range = getColorRange(buckets[i]);
-      if (range.maxRange > widestRange && buckets[i].length > 1) {
-        widestRange = range.maxRange;
-        widestIdx = i;
+    let done = false;
+    while (!done) {
+      const startTick = performance.now();
+      // Process in batches of ~25ms to avoid blocking the main thread too long
+      while (!(done = converter.tick()) && performance.now() - startTick < 25) {
+        // keep ticking
+      }
+      if (!done) {
+        // Yield to the browser briefly
+        await new Promise(r => setTimeout(r, 1));
       }
     }
 
-    if (widestRange <= layerDiff) break; // All remaining buckets are within tolerance
+    // Extract the SVG content
+    const svgString = new XMLSerializer().serializeToString(svgEl);
+    converter.free();
 
-    const bucket = buckets[widestIdx];
-    const range = getColorRange(bucket);
-
-    // Sort by the widest channel and split at median
-    bucket.sort((a, b) => a[range.channel] - b[range.channel]);
-    const mid = Math.floor(bucket.length / 2);
-
-    buckets.splice(widestIdx, 1, bucket.slice(0, mid), bucket.slice(mid));
+    console.log('✅ VTracer color trace complete');
+    return svgString;
+  } finally {
+    // Clean up temporary DOM elements
+    document.body.removeChild(canvas);
+    document.body.removeChild(svgEl);
   }
-
-  // Average each bucket to get representative colors
-  return buckets
-    .filter(b => b.length > 0)
-    .map(bucket => {
-      const sum = bucket.reduce(
-        (acc, p) => ({ r: acc.r + p.r, g: acc.g + p.g, b: acc.b + p.b }),
-        { r: 0, g: 0, b: 0 }
-      );
-      return {
-        r: Math.round(sum.r / bucket.length),
-        g: Math.round(sum.g / bucket.length),
-        b: Math.round(sum.b / bucket.length),
-        count: bucket.length,
-      };
-    })
-    .sort((a, b) => b.count - a.count); // Most frequent first (background first)
 }
-
-function getColorRange(pixels) {
-  let rMin = 255, rMax = 0, gMin = 255, gMax = 0, bMin = 255, bMax = 0;
-  for (const p of pixels) {
-    if (p.r < rMin) rMin = p.r;
-    if (p.r > rMax) rMax = p.r;
-    if (p.g < gMin) gMin = p.g;
-    if (p.g > gMax) gMax = p.g;
-    if (p.b < bMin) bMin = p.b;
-    if (p.b > bMax) bMax = p.b;
-  }
-  const rRange = rMax - rMin;
-  const gRange = gMax - gMin;
-  const bRange = bMax - bMin;
-  const maxRange = Math.max(rRange, gRange, bRange);
-  const channel = maxRange === rRange ? 'r' : maxRange === gRange ? 'g' : 'b';
-  return { maxRange, channel };
-}
-
-function rgbString(color) {
-  return `rgb(${color.r},${color.g},${color.b})`;
-}
-
-// ─── Utilities ───────────────────────────────────────────────────────────────
 
 /**
  * Convert a File to a base64 data URL.
