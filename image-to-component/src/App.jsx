@@ -1,4 +1,4 @@
-import React, { useReducer, useCallback } from 'react';
+import React, { useReducer, useCallback, useEffect } from 'react';
 import ImageUploader from './components/ImageUploader.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import PreviewPanel from './components/PreviewPanel.jsx';
@@ -6,8 +6,10 @@ import OverlayView from './components/OverlayView.jsx';
 import PartsList from './components/PartsList.jsx';
 import RefinePanel from './components/RefinePanel.jsx';
 import ExportPanel from './components/ExportPanel.jsx';
+import AuthBar from './components/AuthBar.jsx';
+import { useAuth } from './auth/AuthProvider.jsx';
 import { PRESETS, traceImage, fileToRawBase64 } from './pipeline/tracer.js';
-import { analyzeImage, generateReplacement } from './pipeline/analyzer.js';
+import { analyzeImage, generateReplacement, setUsageCallback } from './pipeline/analyzer.js';
 import { mergeSVGs } from './pipeline/merger.js';
 import { refineAndReplace } from './pipeline/refiner.js';
 import { exportComponent } from './pipeline/exporter.js';
@@ -44,7 +46,7 @@ const initialState = {
   componentCode: null,
   error: null,
   progress: '',
-  apiKey: localStorage.getItem('anthropic_api_key') || import.meta.env.VITE_ANTHROPIC_API_KEY || '',
+  apiKey: localStorage.getItem('anthropic_api_key') || '',
 };
 
 function reducer(state, action) {
@@ -109,12 +111,23 @@ function toPascalCase(str) {
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const { user, updateUsageFromResponse, workerUrl } = useAuth();
+
+  // Wire up usage callback so worker responses update the auth context
+  useEffect(() => {
+    setUsageCallback(updateUsageFromResponse);
+    return () => setUsageCallback(null);
+  }, [updateUsageFromResponse]);
+
+  // User is "ready for smart mode" if they're signed in (worker auth) OR have a manual API key
+  const idToken = user?.idToken || null;
+  const hasSmartAccess = !!(idToken && workerUrl) || !!state.apiKey;
 
   const handleProcess = useCallback(async () => {
     if (!state.imageFile) return;
 
     try {
-      const isSmartMode = state.pipelineMode === 'smart' && state.apiKey;
+      const isSmartMode = state.pipelineMode === 'smart' && hasSmartAccess;
 
       // Stage 1: Trace geometry
       dispatch({ type: 'SET_STAGE', stage: 'tracing' });
@@ -142,7 +155,7 @@ export default function App() {
       dispatch({ type: 'SET_STAGE', stage: 'analyzing' });
       dispatch({ type: 'SET_PROGRESS', progress: 'Identifying parts...' });
 
-      const manifest = await analyzeImage(base64, state.mediaType, state.apiKey);
+      const manifest = await analyzeImage(base64, state.mediaType, state.apiKey, idToken);
       dispatch({ type: 'SET_MANIFEST', manifest });
       console.log(`✅ Identified ${manifest.length} parts`);
 
@@ -157,7 +170,7 @@ export default function App() {
           progress: `Improving detail ${i + 1}/${lowDetailParts.length}: ${part.name.replace(/_/g, ' ')}...`,
         });
         try {
-          replacements[part.name] = await generateReplacement(base64, state.mediaType, part, state.apiKey);
+          replacements[part.name] = await generateReplacement(base64, state.mediaType, part, state.apiKey, idToken);
           console.log(`✅ Improved ${part.name}`);
         } catch (err) {
           console.log(`❌ Failed to improve ${part.name}: ${err.message}`);
@@ -179,10 +192,10 @@ export default function App() {
       console.log('❌ Pipeline error:', err.message);
       dispatch({ type: 'SET_ERROR', error: err.message });
     }
-  }, [state.imageFile, state.preset, state.customSettings, state.apiKey, state.mediaType, state.pipelineMode]);
+  }, [state.imageFile, state.preset, state.customSettings, state.apiKey, state.mediaType, state.pipelineMode, hasSmartAccess, idToken]);
 
   const handleRefine = useCallback(async (part, feedback) => {
-    if (!state.apiKey || !state.mergedSvg) return;
+    if (!hasSmartAccess || !state.mergedSvg) return;
 
     dispatch({ type: 'SET_PROGRESS', progress: `Refining ${part.name.replace(/_/g, ' ')}...` });
     try {
@@ -192,7 +205,8 @@ export default function App() {
         state.mergedSvg,
         part,
         feedback,
-        state.apiKey
+        state.apiKey,
+        idToken
       );
       dispatch({ type: 'UPDATE_MERGED_SVG', svg: updatedSvg });
       dispatch({ type: 'SET_PROGRESS', progress: '' });
@@ -201,7 +215,7 @@ export default function App() {
       console.log(`❌ Refinement failed: ${err.message}`);
       dispatch({ type: 'SET_ERROR', error: err.message });
     }
-  }, [state.apiKey, state.mergedSvg, state.imageBase64, state.mediaType]);
+  }, [hasSmartAccess, state.apiKey, idToken, state.mergedSvg, state.imageBase64, state.mediaType]);
 
   const handleExport = useCallback(() => {
     dispatch({ type: 'SET_STAGE', stage: 'export' });
@@ -217,6 +231,7 @@ export default function App() {
 
   return (
     <div className="app-container">
+      <AuthBar />
       <h1>Image-to-Component Studio</h1>
       <p className="subtitle">Convert photographs into interactive React SVG components</p>
 
@@ -270,6 +285,7 @@ export default function App() {
               onSettingsChange={(s) => dispatch({ type: 'SET_CUSTOM_SETTINGS', settings: s })}
               apiKey={state.apiKey}
               onApiKeyChange={(key) => dispatch({ type: 'SET_API_KEY', key })}
+              isAuthenticated={!!(idToken && workerUrl)}
             />
           </div>
           <div style={{ textAlign: 'center', marginTop: '1rem' }}>
@@ -312,7 +328,7 @@ export default function App() {
                   selectedPart={state.selectedPart}
                   onPartSelect={(part) => dispatch({ type: 'SET_SELECTED_PART', part })}
                 />
-                {state.selectedPart && state.apiKey && (
+                {state.selectedPart && hasSmartAccess && (
                   <RefinePanel
                     part={state.selectedPart}
                     onRefine={handleRefine}

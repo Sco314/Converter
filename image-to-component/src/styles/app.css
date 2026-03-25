@@ -477,3 +477,89 @@ h2 {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--txt3);
 }
+
+/* Auth bar */
+.auth-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  font-size: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+}
+
+.auth-message {
+  color: var(--txt2);
+  margin-right: auto;
+}
+
+.auth-loading {
+  color: var(--txt3);
+}
+
+.auth-user {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-right: auto;
+}
+
+.auth-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+}
+
+.auth-name {
+  color: var(--txt2);
+  font-size: 0.72rem;
+}
+
+.auth-usage {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.usage-badge {
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  background: rgba(245, 166, 35, 0.15);
+  color: var(--amber);
+  border: 1px solid rgba(245, 166, 35, 0.3);
+}
+
+.usage-badge.unlimited {
+  background: rgba(46, 204, 113, 0.15);
+  color: var(--green);
+  border-color: rgba(46, 204, 113, 0.3);
+}
+
+.btn-google {
+  background: #4285f4;
+  color: white;
+  border-color: #4285f4;
+  font-weight: 600;
+}
+
+.btn-google:hover {
+  background: #3367d6;
+  color: white;
+  border-color: #3367d6;
+}
+
+.btn-upgrade {
+  background: var(--green);
+  color: var(--bg);
+  border-color: var(--green);
+  font-weight: 600;
+}
+
+.btn-upgrade:hover {
+  background: #27ae60;
+  color: var(--bg);
+  border-color: #27ae60;
+}

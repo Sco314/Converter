@@ -14,7 +14,7 @@ const PIPELINE_MODES = {
   },
 };
 
-export default function SettingsPanel({ pipelineMode, onModeChange, preset, onPresetChange, onSettingsChange, apiKey, onApiKeyChange }) {
+export default function SettingsPanel({ pipelineMode, onModeChange, preset, onPresetChange, onSettingsChange, apiKey, onApiKeyChange, isAuthenticated }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [settings, setSettings] = useState(PRESETS[preset]);
 
@@ -48,22 +48,29 @@ export default function SettingsPanel({ pipelineMode, onModeChange, preset, onPr
         ))}
       </div>
 
-      {/* API Key — only show for Smart Trace */}
+      {/* Smart Trace notice — show auth status or API key input */}
       {pipelineMode === 'smart' && (
         <>
-          <div className="api-notice">
-            Smart Trace uses AI vision to identify parts, clean up fine details, and enable click-to-refine.
-            An API key is required for this mode.
-          </div>
-          <div className="setting-item mb-md">
-            <label>API Key</label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => onApiKeyChange(e.target.value)}
-              placeholder="sk-ant-..."
-            />
-          </div>
+          {isAuthenticated ? (
+            <div className="api-notice" style={{ borderColor: 'rgba(46, 204, 113, 0.3)', background: 'rgba(46, 204, 113, 0.08)' }}>
+              You're signed in — Smart Trace is ready. AI vision will identify parts, clean up details, and enable refinement.
+            </div>
+          ) : (
+            <>
+              <div className="api-notice">
+                Sign in with Google above to use Smart Trace, or enter your own API key below.
+              </div>
+              <div className="setting-item mb-md">
+                <label>API Key (optional if signed in)</label>
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={(e) => onApiKeyChange(e.target.value)}
+                  placeholder="sk-ant-..."
+                />
+              </div>
+            </>
+          )}
         </>
       )}
 

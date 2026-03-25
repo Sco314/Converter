@@ -72,7 +72,7 @@ export function getPartSvg(mergedSvg, partName) {
  * @param {string|null} apiKey
  * @returns {Promise<string>} updated merged SVG
  */
-export async function refineAndReplace(imageBase64, mediaType, mergedSvg, part, userFeedback, apiKey = null) {
+export async function refineAndReplace(imageBase64, mediaType, mergedSvg, part, userFeedback, apiKey = null, idToken = null) {
   const currentSnippet = getPartSvg(mergedSvg, part.name);
 
   const clickX = part.bbox.x + part.bbox.w / 2;
@@ -85,7 +85,8 @@ export async function refineAndReplace(imageBase64, mediaType, mergedSvg, part, 
     clickX,
     clickY,
     userFeedback,
-    apiKey
+    apiKey,
+    idToken
   );
 
   return replacePart(mergedSvg, part.name, newSvg);
