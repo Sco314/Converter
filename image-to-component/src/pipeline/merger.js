@@ -39,9 +39,12 @@ export function mergeSVGs(vtracerSvg, claudeManifest, claudeReplacements = {}) {
     newMatches.forEach(i => used.add(i));
 
     if (part.detail_quality === 'low' && claudeReplacements[part.name]) {
-      // Replace with Claude's clean version
+      // Replace with Claude's clean version, positioned at the correct location
+      const positionedSvg = positionReplacement(
+        claudeReplacements[part.name], partBbox, part, viewBox
+      );
       groups[part.name] = {
-        svg: claudeReplacements[part.name],
+        svg: positionedSvg,
         type: part.type,
         interactive: part.interactive,
         dynamic: part.dynamic,
@@ -108,6 +111,80 @@ export function replacePart(mergedSvg, partName, newSvg) {
 
   const serializer = new XMLSerializer();
   return serializer.serializeToString(doc.documentElement);
+}
+
+/**
+ * Position a replacement SVG at the correct location and size in the main SVG.
+ * Claude's replacement SVGs use their own local coordinate systems (e.g., 0-16 for a screw).
+ * We need to transform them to match the part's actual position in the full SVG.
+ */
+function positionReplacement(replacementSvg, partBbox, part, viewBox) {
+  // Measure the replacement SVG's actual bounds using a hidden DOM element
+  const bounds = measureSvgBounds(replacementSvg, viewBox);
+
+  const attrs = [
+    `id="${part.name}"`,
+    `class="${part.type}"`,
+  ];
+  if (part.interactive) attrs.push('data-interactive="true"');
+  if (part.dynamic) attrs.push('data-dynamic="true"');
+
+  if (bounds && bounds.w > 0 && bounds.h > 0) {
+    // Scale from replacement's coordinate space to part's actual size
+    const sx = partBbox.w / bounds.w;
+    const sy = partBbox.h / bounds.h;
+    // Use uniform scale to avoid distortion
+    const scale = Math.min(sx, sy);
+    // Center the replacement within the part bbox
+    const scaledW = bounds.w * scale;
+    const scaledH = bounds.h * scale;
+    const offsetX = partBbox.x + (partBbox.w - scaledW) / 2;
+    const offsetY = partBbox.y + (partBbox.h - scaledH) / 2;
+
+    const transform = `translate(${offsetX}, ${offsetY}) scale(${scale}) translate(${-bounds.x}, ${-bounds.y})`;
+    return `<g ${attrs.join(' ')} transform="${transform}">\n  ${replacementSvg}\n</g>`;
+  }
+
+  // Fallback: just translate to the part position without scaling
+  const transform = `translate(${partBbox.x}, ${partBbox.y})`;
+  return `<g ${attrs.join(' ')} transform="${transform}">\n  ${replacementSvg}\n</g>`;
+}
+
+/**
+ * Measure the bounding box of an SVG snippet using a hidden DOM element.
+ */
+function measureSvgBounds(svgContent, viewBox) {
+  try {
+    const hiddenSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    hiddenSvg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+    hiddenSvg.style.position = 'absolute';
+    hiddenSvg.style.left = '-9999px';
+    hiddenSvg.style.top = '-9999px';
+    hiddenSvg.style.width = viewBox.w + 'px';
+    hiddenSvg.style.height = viewBox.h + 'px';
+    document.body.appendChild(hiddenSvg);
+
+    // Parse the replacement SVG and append it
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(
+      `<svg xmlns="http://www.w3.org/2000/svg">${svgContent}</svg>`,
+      'image/svg+xml'
+    );
+    const elements = doc.querySelector('svg').childNodes;
+    const wrapper = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    for (const el of elements) {
+      wrapper.appendChild(hiddenSvg.ownerDocument.importNode(el, true));
+    }
+    hiddenSvg.appendChild(wrapper);
+
+    const bbox = wrapper.getBBox();
+    const result = { x: bbox.x, y: bbox.y, w: bbox.width, h: bbox.height };
+
+    document.body.removeChild(hiddenSvg);
+    return result;
+  } catch {
+    return null;
+  }
 }
 
 function wrapInGroup(elements, id, type, interactive, dynamic) {
