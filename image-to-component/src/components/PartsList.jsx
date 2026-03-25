@@ -6,7 +6,7 @@ export default function PartsList({ manifest, groups, selectedPart, onPartSelect
       <div>
         <h2>Parts</h2>
         <p style={{ fontSize: '0.75rem', color: 'var(--txt3)' }}>
-          No parts identified. Add an API key to enable Claude analysis.
+          No parts identified. Use Smart Trace mode with an API key to enable part detection.
         </p>
       </div>
     );

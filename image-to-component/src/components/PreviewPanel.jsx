@@ -3,14 +3,14 @@ import React from 'react';
 export default function PreviewPanel({ imageUrl, svgString, manifest }) {
   return (
     <div className="card">
-      <h2>Trace & Analyze</h2>
+      <h2>Processing</h2>
       <div className="split-view">
         <div className="panel">
           <div className="panel-label">Original Image</div>
           {imageUrl && <img src={imageUrl} alt="Original" />}
         </div>
         <div className="panel">
-          <div className="panel-label">VTracer Output</div>
+          <div className="panel-label">Traced Output</div>
           {svgString && (
             <div dangerouslySetInnerHTML={{ __html: svgString }} />
           )}

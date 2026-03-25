@@ -14,8 +14,20 @@ import { exportComponent } from './pipeline/exporter.js';
 
 const STAGES = ['upload', 'tracing', 'analyzing', 'review', 'export'];
 
+const PIPELINE_MODES = {
+  quick: {
+    label: 'Quick Trace',
+    description: 'Fast geometry extraction — outlines, curves, and colors',
+  },
+  smart: {
+    label: 'Smart Trace',
+    description: 'Geometry + AI part identification, detail cleanup, and refinement',
+  },
+};
+
 const initialState = {
   stage: 'upload',
+  pipelineMode: 'smart',
   imageFile: null,
   imageUrl: null,
   imageBase64: null,
@@ -32,7 +44,7 @@ const initialState = {
   componentCode: null,
   error: null,
   progress: '',
-  apiKey: localStorage.getItem('anthropic_api_key') || '',
+  apiKey: localStorage.getItem('anthropic_api_key') || import.meta.env.VITE_ANTHROPIC_API_KEY || '',
 };
 
 function reducer(state, action) {
@@ -46,6 +58,8 @@ function reducer(state, action) {
         componentName: toPascalCase(action.file.name.replace(/\.[^.]+$/, '')),
         error: null,
       };
+    case 'SET_PIPELINE_MODE':
+      return { ...state, pipelineMode: action.mode };
     case 'SET_PRESET':
       return { ...state, preset: action.preset };
     case 'SET_CUSTOM_SETTINGS':
@@ -100,37 +114,39 @@ export default function App() {
     if (!state.imageFile) return;
 
     try {
-      // Stage 1: Trace
+      const isSmartMode = state.pipelineMode === 'smart' && state.apiKey;
+
+      // Stage 1: Trace geometry
       dispatch({ type: 'SET_STAGE', stage: 'tracing' });
-      dispatch({ type: 'SET_PROGRESS', progress: 'Running VTracer...' });
+      dispatch({ type: 'SET_PROGRESS', progress: 'Extracting geometry...' });
 
       const options = state.customSettings || PRESETS[state.preset];
       const svg = await traceImage(state.imageFile, options);
       dispatch({ type: 'SET_VTRACER_SVG', svg });
-      console.log('✅ VTracer complete');
+      console.log('✅ Geometry extraction complete');
 
-      // Get base64 for Claude API
+      // Get base64 for AI analysis
       const base64 = await fileToRawBase64(state.imageFile);
       dispatch({ type: 'SET_IMAGE_BASE64', base64 });
 
-      // Stage 2: Analyze
-      if (!state.apiKey) {
+      // Quick Trace mode — skip AI analysis
+      if (!isSmartMode) {
         dispatch({ type: 'SET_STAGE', stage: 'review' });
         dispatch({ type: 'SET_PROGRESS', progress: '' });
-        // Skip Claude analysis, just show the VTracer SVG
         dispatch({ type: 'SET_MANIFEST', manifest: [] });
         dispatch({ type: 'SET_MERGED', svg, groups: {} });
         return;
       }
 
+      // Smart Trace — AI part identification
       dispatch({ type: 'SET_STAGE', stage: 'analyzing' });
-      dispatch({ type: 'SET_PROGRESS', progress: 'Analyzing parts with Claude...' });
+      dispatch({ type: 'SET_PROGRESS', progress: 'Identifying parts...' });
 
       const manifest = await analyzeImage(base64, state.mediaType, state.apiKey);
       dispatch({ type: 'SET_MANIFEST', manifest });
       console.log(`✅ Identified ${manifest.length} parts`);
 
-      // Auto-generate replacements for low-detail parts
+      // Auto-improve low-detail parts
       const lowDetailParts = manifest.filter(p => p.detail_quality === 'low');
       const replacements = {};
 
@@ -138,23 +154,23 @@ export default function App() {
         const part = lowDetailParts[i];
         dispatch({
           type: 'SET_PROGRESS',
-          progress: `Generating replacement ${i + 1}/${lowDetailParts.length}: ${part.name}...`,
+          progress: `Improving detail ${i + 1}/${lowDetailParts.length}: ${part.name.replace(/_/g, ' ')}...`,
         });
         try {
           replacements[part.name] = await generateReplacement(base64, state.mediaType, part, state.apiKey);
-          console.log(`✅ Replacement for ${part.name}`);
+          console.log(`✅ Improved ${part.name}`);
         } catch (err) {
-          console.log(`❌ Failed to replace ${part.name}: ${err.message}`);
+          console.log(`❌ Failed to improve ${part.name}: ${err.message}`);
         }
       }
 
       dispatch({ type: 'SET_REPLACEMENTS', replacements });
 
-      // Stage 3: Merge
-      dispatch({ type: 'SET_PROGRESS', progress: 'Merging SVG with semantics...' });
+      // Merge geometry with identified parts
+      dispatch({ type: 'SET_PROGRESS', progress: 'Assembling component...' });
       const { svg: mergedSvg, groups } = mergeSVGs(svg, manifest, replacements);
       dispatch({ type: 'SET_MERGED', svg: mergedSvg, groups });
-      console.log('✅ Merge complete');
+      console.log('✅ Assembly complete');
 
       // Move to review
       dispatch({ type: 'SET_STAGE', stage: 'review' });
@@ -163,12 +179,12 @@ export default function App() {
       console.log('❌ Pipeline error:', err.message);
       dispatch({ type: 'SET_ERROR', error: err.message });
     }
-  }, [state.imageFile, state.preset, state.customSettings, state.apiKey, state.mediaType]);
+  }, [state.imageFile, state.preset, state.customSettings, state.apiKey, state.mediaType, state.pipelineMode]);
 
   const handleRefine = useCallback(async (part, feedback) => {
     if (!state.apiKey || !state.mergedSvg) return;
 
-    dispatch({ type: 'SET_PROGRESS', progress: `Refining ${part.name}...` });
+    dispatch({ type: 'SET_PROGRESS', progress: `Refining ${part.name.replace(/_/g, ' ')}...` });
     try {
       const updatedSvg = await refineAndReplace(
         state.imageBase64,
@@ -247,6 +263,8 @@ export default function App() {
           </div>
           <div className="card">
             <SettingsPanel
+              pipelineMode={state.pipelineMode}
+              onModeChange={(mode) => dispatch({ type: 'SET_PIPELINE_MODE', mode })}
               preset={state.preset}
               onPresetChange={(p) => dispatch({ type: 'SET_PRESET', preset: p })}
               onSettingsChange={(s) => dispatch({ type: 'SET_CUSTOM_SETTINGS', settings: s })}

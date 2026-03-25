@@ -3,13 +3,24 @@ import { PRESETS } from '../pipeline/tracer.js';
 
 const PRESET_KEYS = Object.keys(PRESETS);
 
-export default function SettingsPanel({ preset, onPresetChange, onSettingsChange, apiKey, onApiKeyChange }) {
+const PIPELINE_MODES = {
+  quick: {
+    label: 'Quick Trace',
+    description: 'Fast geometry extraction — outlines, curves, and colors only',
+  },
+  smart: {
+    label: 'Smart Trace',
+    description: 'Geometry + AI part identification, detail cleanup, and refinement',
+  },
+};
+
+export default function SettingsPanel({ pipelineMode, onModeChange, preset, onPresetChange, onSettingsChange, apiKey, onApiKeyChange }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [settings, setSettings] = useState(PRESETS[preset]);
 
   useEffect(() => {
     setSettings(PRESETS[preset]);
-    onSettingsChange(null); // Reset to preset defaults
+    onSettingsChange(null);
   }, [preset]);
 
   const updateSetting = (key, value) => {
@@ -22,22 +33,42 @@ export default function SettingsPanel({ preset, onPresetChange, onSettingsChange
     <div>
       <h2>Settings</h2>
 
-      {/* API Key */}
-      <div className="api-notice">
-        Claude API key enables automatic part identification, detail replacement, and refinement.
-        Without it, only VTracer geometry output is available.
-      </div>
-      <div className="setting-item mb-md">
-        <label>Anthropic API Key</label>
-        <input
-          type="password"
-          value={apiKey}
-          onChange={(e) => onApiKeyChange(e.target.value)}
-          placeholder="sk-ant-..."
-        />
+      {/* Pipeline Mode Selector */}
+      <div className="panel-label mb-sm">Pipeline Mode</div>
+      <div className="preset-selector" style={{ marginBottom: '1.25rem' }}>
+        {Object.entries(PIPELINE_MODES).map(([key, mode]) => (
+          <button
+            key={key}
+            className={`preset-btn ${pipelineMode === key ? 'active' : ''}`}
+            onClick={() => onModeChange(key)}
+          >
+            <span className="preset-label">{mode.label}</span>
+            <span className="preset-desc">{mode.description}</span>
+          </button>
+        ))}
       </div>
 
-      {/* Presets */}
+      {/* API Key — only show for Smart Trace */}
+      {pipelineMode === 'smart' && (
+        <>
+          <div className="api-notice">
+            Smart Trace uses AI vision to identify parts, clean up fine details, and enable click-to-refine.
+            An API key is required for this mode.
+          </div>
+          <div className="setting-item mb-md">
+            <label>API Key</label>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => onApiKeyChange(e.target.value)}
+              placeholder="sk-ant-..."
+            />
+          </div>
+        </>
+      )}
+
+      {/* Image Type Presets */}
+      <div className="panel-label mb-sm">Image Type</div>
       <div className="preset-selector">
         {PRESET_KEYS.map((key) => (
           <button
