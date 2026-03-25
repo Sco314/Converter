@@ -1,15 +1,19 @@
 /**
- * VTracer wrapper — abstracts server-side native binding and browser WASM fallback.
+ * VTracer wrapper — uses the official vtracer-webapp WASM module with full color support.
+ *
+ * The ColorImageConverter reads pixels from a canvas element and writes SVG paths
+ * directly to an SVG DOM element. This is the same engine that powers vtracer.org.
  */
+
+import { ColorImageConverter } from 'vtracer-webapp';
 
 export const PRESETS = {
   photograph: {
     label: 'Equipment Photo',
     description: 'High-res photo of real equipment',
-    colorMode: 'color',
-    hierarchical: 'stacked',
+    mode: 'spline',
     filterSpeckle: 4,
-    colorPrecision: 8,
+    colorPrecision: 6,
     layerDifference: 16,
     cornerThreshold: 60,
     lengthThreshold: 4.0,
@@ -20,8 +24,7 @@ export const PRESETS = {
   diagram: {
     label: 'Technical Diagram',
     description: 'Clean illustration or P&ID symbol',
-    colorMode: 'color',
-    hierarchical: 'stacked',
+    mode: 'spline',
     filterSpeckle: 2,
     colorPrecision: 4,
     layerDifference: 24,
@@ -34,8 +37,7 @@ export const PRESETS = {
   highContrast: {
     label: 'High Contrast / Icon',
     description: 'Simple shapes, few colors, crisp edges',
-    colorMode: 'color',
-    hierarchical: 'stacked',
+    mode: 'polygon',
     filterSpeckle: 8,
     colorPrecision: 3,
     layerDifference: 32,
@@ -48,156 +50,84 @@ export const PRESETS = {
 };
 
 /**
- * Try server-side VTracer first, fall back to in-browser WASM.
- * @param {File} imageFile - the uploaded image file
- * @param {object} options - VTracer options (from presets or custom)
+ * Trace an image to SVG using vtracer's ColorImageConverter (WASM).
+ * @param {File} imageFile
+ * @param {object} options - from PRESETS or custom settings
  * @returns {Promise<string>} SVG string
  */
 export async function traceImage(imageFile, options = PRESETS.photograph) {
-  try {
-    return await traceViaServer(imageFile, options);
-  } catch (err) {
-    console.log('❌ Server trace unavailable, falling back to WASM:', err.message);
-    return await traceViaWasm(imageFile, options);
-  }
-}
-
-async function traceViaServer(imageFile, options) {
-  const formData = new FormData();
-  formData.append('image', imageFile);
-  formData.append('options', JSON.stringify(options));
-
-  const res = await fetch('/api/trace', {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!res.ok) {
-    throw new Error(`Server trace failed: ${res.status}`);
-  }
-
-  const data = await res.json();
-  return data.svg;
-}
-
-async function traceViaWasm(imageFile, options) {
-  // Load image into canvas to get ImageData
+  // Load image into a temporary canvas
   const imageBitmap = await createImageBitmap(imageFile);
+  const canvasId = '__vtracer_canvas_' + Date.now();
+  const svgId = '__vtracer_svg_' + Date.now();
+
+  // Create temporary DOM elements (vtracer reads/writes via DOM element IDs)
   const canvas = document.createElement('canvas');
+  canvas.id = canvasId;
   canvas.width = imageBitmap.width;
   canvas.height = imageBitmap.height;
+  canvas.style.position = 'absolute';
+  canvas.style.left = '-9999px';
+  canvas.style.top = '-9999px';
+  document.body.appendChild(canvas);
+
   const ctx = canvas.getContext('2d');
   ctx.drawImage(imageBitmap, 0, 0);
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-  // Dynamic import of WASM vectorizer
-  let imageDataToSvg;
+  const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svgEl.id = svgId;
+  svgEl.style.position = 'absolute';
+  svgEl.style.left = '-9999px';
+  svgEl.style.top = '-9999px';
+  document.body.appendChild(svgEl);
+
   try {
-    const mod = await import('vectortracer');
-    imageDataToSvg = mod.imageDataToSvg || mod.default?.imageDataToSvg;
-  } catch {
-    // If vectortracer isn't available, use the built-in canvas fallback
-    console.log('❌ WASM vectorizer not available, using canvas fallback');
-    return canvasFallbackTrace(imageData, canvas.width, canvas.height, options);
-  }
+    // Build params — vtracer expects specific value transformations
+    const params = JSON.stringify({
+      canvas_id: canvasId,
+      svg_id: svgId,
+      mode: options.mode || 'spline',
+      clustering_mode: 'color',
+      hierarchical: 'stacked',
+      filter_speckle: (options.filterSpeckle ?? 4) * (options.filterSpeckle ?? 4), // squared
+      color_precision: 8 - (options.colorPrecision ?? 6), // inverted
+      layer_difference: options.layerDifference ?? 16,
+      corner_threshold: (options.cornerThreshold ?? 60) * Math.PI / 180, // degrees → radians
+      splice_threshold: (options.spliceThreshold ?? 45) * Math.PI / 180, // degrees → radians
+      length_threshold: options.lengthThreshold ?? 4.0,
+      max_iterations: options.maxIterations ?? 10,
+      path_precision: options.pathPrecision ?? 3,
+    });
 
-  if (!imageDataToSvg) {
-    return canvasFallbackTrace(imageData, canvas.width, canvas.height, options);
-  }
+    const converter = ColorImageConverter.new_with_string(params);
+    converter.init();
 
-  const svg = await imageDataToSvg(imageData, {
-    colorMode: options.colorMode || 'color',
-    hierarchical: options.hierarchical || 'stacked',
-    filterSpeckle: options.filterSpeckle ?? 4,
-    colorPrecision: options.colorPrecision ?? 8,
-    layerDifference: options.layerDifference ?? 16,
-    cornerThreshold: options.cornerThreshold ?? 60,
-    lengthThreshold: options.lengthThreshold ?? 4.0,
-    maxIterations: options.maxIterations ?? 10,
-    spliceThreshold: options.spliceThreshold ?? 45,
-    pathPrecision: options.pathPrecision ?? 3,
-  });
-
-  console.log('✅ WASM trace complete');
-  return svg;
-}
-
-/**
- * Canvas-based color quantization fallback when neither native nor WASM VTracer is available.
- * Produces a simplified SVG by extracting dominant color regions.
- */
-function canvasFallbackTrace(imageData, width, height, options) {
-  const { data } = imageData;
-  const colorPrecision = options.colorPrecision ?? 6;
-  const filterSpeckle = options.filterSpeckle ?? 4;
-  const quantize = Math.max(1, Math.round(256 / Math.pow(2, colorPrecision)));
-
-  // Quantize colors and build a color map
-  const colorMap = new Map();
-  const pixelColors = new Uint32Array(width * height);
-
-  for (let i = 0; i < data.length; i += 4) {
-    const r = Math.round(data[i] / quantize) * quantize;
-    const g = Math.round(data[i + 1] / quantize) * quantize;
-    const b = Math.round(data[i + 2] / quantize) * quantize;
-    const a = data[i + 3];
-    if (a < 128) continue;
-    const key = (r << 16) | (g << 8) | b;
-    pixelColors[i / 4] = key;
-    colorMap.set(key, (colorMap.get(key) || 0) + 1);
-  }
-
-  // Sort colors by frequency, take top N
-  const maxColors = Math.min(64, colorMap.size);
-  const sortedColors = [...colorMap.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, maxColors);
-
-  // Build SVG paths using simple rectangular regions for each color
-  const paths = [];
-  const blockSize = Math.max(2, Math.ceil(Math.sqrt(filterSpeckle)));
-
-  for (const [colorKey] of sortedColors) {
-    const r = (colorKey >> 16) & 0xff;
-    const g = (colorKey >> 8) & 0xff;
-    const b = colorKey & 0xff;
-    const rects = [];
-
-    // Scan in blocks
-    for (let y = 0; y < height; y += blockSize) {
-      let runStart = -1;
-      for (let x = 0; x <= width; x += blockSize) {
-        let match = false;
-        if (x < width) {
-          // Check if majority of block pixels match this color
-          let count = 0;
-          let total = 0;
-          for (let dy = 0; dy < blockSize && y + dy < height; dy++) {
-            for (let dx = 0; dx < blockSize && x + dx < width; dx++) {
-              total++;
-              if (pixelColors[(y + dy) * width + (x + dx)] === colorKey) count++;
-            }
-          }
-          match = count > total / 2;
-        }
-        if (match && runStart === -1) {
-          runStart = x;
-        } else if (!match && runStart !== -1) {
-          rects.push({ x: runStart, y, w: x - runStart, h: blockSize });
-          runStart = -1;
-        }
+    // Run the converter to completion using tick()
+    // tick() returns true when done
+    let done = false;
+    while (!done) {
+      const startTick = performance.now();
+      // Process in batches of ~25ms to avoid blocking the main thread too long
+      while (!(done = converter.tick()) && performance.now() - startTick < 25) {
+        // keep ticking
+      }
+      if (!done) {
+        // Yield to the browser briefly
+        await new Promise(r => setTimeout(r, 1));
       }
     }
 
-    if (rects.length > 0) {
-      // Merge adjacent rects into path data
-      const d = rects.map(r => `M${r.x},${r.y}h${r.w}v${r.h}h${-r.w}z`).join('');
-      paths.push(`<path d="${d}" fill="rgb(${r},${g},${b})" />`);
-    }
-  }
+    // Extract the SVG content
+    const svgString = new XMLSerializer().serializeToString(svgEl);
+    converter.free();
 
-  console.log('✅ Canvas fallback trace complete (' + paths.length + ' color layers)');
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}">\n${paths.join('\n')}\n</svg>`;
+    console.log('✅ VTracer color trace complete');
+    return svgString;
+  } finally {
+    // Clean up temporary DOM elements
+    document.body.removeChild(canvas);
+    document.body.removeChild(svgEl);
+  }
 }
 
 /**
