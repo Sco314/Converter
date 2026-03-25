@@ -1,9 +1,13 @@
 /**
  * Claude API Vision analysis — identifies parts and generates replacement SVG for low-detail elements.
+ *
+ * When auth is provided (user signed in), requests go through the Cloudflare Worker
+ * which holds the API key securely. Falls back to direct API calls with user-provided key.
  */
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-sonnet-4-20250514';
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
 
 /**
  * Analyze an image to identify parts for SVG component creation.
@@ -12,7 +16,7 @@ const MODEL = 'claude-sonnet-4-20250514';
  * @param {string|null} apiKey - Anthropic API key (null = use server proxy)
  * @returns {Promise<Array>} Parts manifest
  */
-export async function analyzeImage(imageBase64, mediaType, apiKey = null) {
+export async function analyzeImage(imageBase64, mediaType, apiKey = null, idToken = null) {
   const systemPrompt = `You are an industrial equipment SVG component engineer. You analyze photographs of industrial instruments and equipment to identify their parts for creating interactive SVG components.`;
 
   const userContent = [
@@ -49,7 +53,7 @@ Respond with ONLY a JSON array. No markdown, no explanation.`,
     messages: [{ role: 'user', content: userContent }],
   };
 
-  const json = await callClaude(body, apiKey);
+  const json = await callClaude(body, apiKey, 3, idToken);
   const text = json.content[0].text;
 
   try {
@@ -70,7 +74,7 @@ Respond with ONLY a JSON array. No markdown, no explanation.`,
  * @param {string|null} apiKey
  * @returns {Promise<string>} SVG <g> element string
  */
-export async function generateReplacement(imageBase64, mediaType, part, apiKey = null) {
+export async function generateReplacement(imageBase64, mediaType, part, apiKey = null, idToken = null) {
   const userContent = [
     {
       type: 'image',
@@ -104,7 +108,7 @@ Respond with ONLY the SVG <g> element. No markdown fences, no explanation.`,
     messages: [{ role: 'user', content: userContent }],
   };
 
-  const json = await callClaude(body, apiKey);
+  const json = await callClaude(body, apiKey, 3, idToken);
   let svgText = json.content[0].text.trim();
 
   // Strip markdown fences if present
@@ -124,7 +128,7 @@ Respond with ONLY the SVG <g> element. No markdown fences, no explanation.`,
  * @param {string|null} apiKey
  * @returns {Promise<string>} Replacement SVG <g> element
  */
-export async function refinePart(imageBase64, mediaType, currentSvgSnippet, clickX, clickY, userFeedback, apiKey = null) {
+export async function refinePart(imageBase64, mediaType, currentSvgSnippet, clickX, clickY, userFeedback, apiKey = null, idToken = null) {
   const userContent = [
     {
       type: 'image',
@@ -151,21 +155,48 @@ Regenerate the SVG for this specific part, addressing the user's feedback. Keep 
     messages: [{ role: 'user', content: userContent }],
   };
 
-  const json = await callClaude(body, apiKey);
+  const json = await callClaude(body, apiKey, 3, idToken);
   let svgText = json.content[0].text.trim();
   svgText = svgText.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
   return svgText;
 }
 
+// Callback to receive usage info from worker responses
+let _usageCallback = null;
+
 /**
- * Call Claude API — via server proxy or directly.
+ * Set a callback that receives usage data ({ remaining, limit, unlimited })
+ * after each worker API call.
  */
-async function callClaude(body, apiKey, retries = 3) {
+export function setUsageCallback(cb) {
+  _usageCallback = cb;
+}
+
+/**
+ * Call Claude API — via Cloudflare Worker (preferred), server proxy, or directly.
+ *
+ * @param {object} body - Claude API request body
+ * @param {string|null} apiKey - User-provided API key (null if using worker auth)
+ * @param {number} retries - Number of retry attempts
+ * @param {string|null} idToken - Google ID token for worker auth
+ */
+async function callClaude(body, apiKey, retries = 3, idToken = null) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       let res;
-      if (apiKey) {
-        // Direct API call
+
+      if (idToken && WORKER_URL) {
+        // Authenticated worker proxy — API key stays on server
+        res = await fetch(`${WORKER_URL}/api/analyze`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${idToken}`,
+          },
+          body: JSON.stringify(body),
+        });
+      } else if (apiKey) {
+        // Direct API call with user-provided key (legacy/dev mode)
         res = await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
           headers: {
@@ -177,7 +208,7 @@ async function callClaude(body, apiKey, retries = 3) {
           body: JSON.stringify(body),
         });
       } else {
-        // Server proxy
+        // Local server proxy
         res = await fetch('/api/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -186,6 +217,11 @@ async function callClaude(body, apiKey, retries = 3) {
       }
 
       if (res.status === 429 && attempt < retries) {
+        // Check if it's a usage limit (not a rate limit)
+        const errData = await res.json().catch(() => null);
+        if (errData?.code === 'LIMIT_REACHED') {
+          throw new Error('Daily conversion limit reached. Upgrade for unlimited access.');
+        }
         const wait = Math.pow(2, attempt + 1) * 1000;
         console.log(`⏳ Rate limited, retrying in ${wait / 1000}s...`);
         await new Promise(r => setTimeout(r, wait));
@@ -197,9 +233,18 @@ async function callClaude(body, apiKey, retries = 3) {
         throw new Error(`Claude API error ${res.status}: ${errText}`);
       }
 
-      return await res.json();
+      const json = await res.json();
+
+      // Extract and forward usage info from worker response
+      if (json._usage && _usageCallback) {
+        _usageCallback(json._usage);
+        delete json._usage;
+      }
+
+      return json;
     } catch (err) {
       if (attempt === retries) throw err;
+      if (err.message.includes('Daily conversion limit')) throw err;
       const wait = Math.pow(2, attempt + 1) * 1000;
       console.log(`⏳ Request failed, retrying in ${wait / 1000}s...`);
       await new Promise(r => setTimeout(r, wait));

@@ -5,6 +5,7 @@ import topLevelAwait from 'vite-plugin-top-level-await';
 
 export default defineConfig({
   plugins: [react(), wasm(), topLevelAwait()],
+  base: '/Converter/image-to-component/dist/',
   root: 'src',
   build: {
     outDir: '../dist',
