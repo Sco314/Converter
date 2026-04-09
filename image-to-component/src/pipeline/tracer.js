@@ -117,6 +117,13 @@ export async function traceImage(imageFile, options = PRESETS.photograph) {
       }
     }
 
+    // Ensure viewBox matches image dimensions (vtracer uses pixel coordinates)
+    if (!svgEl.getAttribute('viewBox')) {
+      svgEl.setAttribute('viewBox', `0 0 ${imageBitmap.width} ${imageBitmap.height}`);
+    }
+    svgEl.setAttribute('width', String(imageBitmap.width));
+    svgEl.setAttribute('height', String(imageBitmap.height));
+
     // Extract the SVG content
     const svgString = new XMLSerializer().serializeToString(svgEl);
     converter.free();
